@@ -113,7 +113,9 @@ namespace Kkts.Dynamic
                     propType = typeof(IEnumerable<>).MakeGenericType(alternation.Type);
                 }
 
-                DeclareProperty(binding.DtoProperty, propType, memberInfo.GetCustomAttributesData(), binding.Alternation.PropertyType == SpecialPropertyType.Alternative, alternation.Cls);
+                var attributesData = binding.Mode != BindingMode.OneWayToDto ? memberInfo.GetCustomAttributesData() : null;
+
+                DeclareProperty(binding.DtoProperty, propType, attributesData, binding.Alternation.PropertyType == SpecialPropertyType.Alternative, alternation.Cls);
             }
         }
 

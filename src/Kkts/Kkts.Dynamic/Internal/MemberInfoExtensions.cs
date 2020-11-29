@@ -27,6 +27,7 @@ namespace Kkts.Dynamic.Internal
 			return conversionType == typeof(string)
 				|| conversionType.IsPrimitive
 				|| conversionType.IsEnum
+				|| conversionType == typeof(decimal)
 				|| conversionType == typeof(DateTime)
 				|| conversionType == typeof(DateTimeOffset)
 				|| conversionType == typeof(char[])

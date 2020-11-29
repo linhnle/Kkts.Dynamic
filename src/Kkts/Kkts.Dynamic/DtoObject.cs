@@ -1,6 +1,4 @@
-﻿using Kkts.Dynamic.Internal;
-
-namespace Kkts.Dynamic
+﻿namespace Kkts.Dynamic
 {
     public static class DtoObject
     {

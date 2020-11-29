@@ -4,7 +4,7 @@ using System.Linq;
 using System.Reflection;
 using System.Reflection.Emit;
 
-namespace Kkts.Dynamic.Internal
+namespace Kkts.Dynamic
 {
     public sealed class DynamicAssembly : IDisposable
     {

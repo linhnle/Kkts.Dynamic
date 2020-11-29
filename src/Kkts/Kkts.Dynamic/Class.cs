@@ -1,11 +1,12 @@
-﻿using System;
+﻿using Kkts.Dynamic.Internal;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Linq.Expressions;
 using System.Reflection;
 using System.Reflection.Emit;
 
-namespace Kkts.Dynamic.Internal
+namespace Kkts.Dynamic
 {
     public sealed class Class : IDisposable
     {

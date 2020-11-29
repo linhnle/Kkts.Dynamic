@@ -4,7 +4,7 @@
     <TargetFramework>netstandard2.0</TargetFramework>
     <Authors>Linh Le</Authors>
     <Company>KKTS Ltd.</Company>
-    <Description>A lightweight and dynamic mapper, you don't need to declare any classess for View Model or Data Transfer Object, just declare property binding</Description>
+    <Description>A lightweight and dynamic mapper, you don't need to declare any classes for View Model or Data Transfer Object, just declare property binding</Description>
     <Copyright>Copyright (C) 2016-2020 KKTS Ltd.</Copyright>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/linhnle/Kkts.Dynamic</PackageProjectUrl>

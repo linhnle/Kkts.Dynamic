@@ -10,7 +10,7 @@
     <PackageProjectUrl>https://github.com/linhnle/Kkts.Dynamic</PackageProjectUrl>
     <RepositoryUrl>https://github.com/linhnle/Kkts.Dynamic.git</RepositoryUrl>
     <RepositoryType>Git</RepositoryType>
-    <PackageTags>Mapper, Dynamic Mapper, Anonymous Type</PackageTags>
+    <PackageTags>Mapper, DynamicMapper, AnonymousType</PackageTags>
     <Version>1.0.0-rc1</Version>
   </PropertyGroup>
 

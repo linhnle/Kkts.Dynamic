@@ -159,6 +159,8 @@ DTO -> Data Transfer Object
 4. All dto objects are implemented interface IDtoObject
 5. For example above, you don't need to decare two classes Category and Tag if the dto structure of the classes are the same with entities 
 6. All attributes of property of entity will copy to property of DTO
+7. You will never worry about null exception when calling Mapper.MapFromDtoToEntity or Mapper.MapFromEntityToDto, it always check if null before mapping a property
+8. You will never worry about performance because the class and the mapping are built by IL code
 
 ## Contacts
 **[LinkedIn](https://www.linkedin.com/in/linh-le-258417105/)**

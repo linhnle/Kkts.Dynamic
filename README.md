@@ -2,7 +2,7 @@
 A lightweight and dynamic mapper, you don't need to declare any classes for View Model or Data Transfer Object, just declare property bindings.
 
 
-get via nuget **[Kkts.Expressions](https://www.nuget.org/packages/Kkts.Dynamic)** 
+get via nuget **[Kkts.Dynamic](https://www.nuget.org/packages/Kkts.Dynamic)** 
 
 ### Sample class
 ``` csharp

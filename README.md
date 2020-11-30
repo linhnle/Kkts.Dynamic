@@ -151,12 +151,9 @@ var resultJson = JsonConvert.SerializeObject(productDto);
 #### Note
 1. You can reverse the map by using Mapper.MapFromDtoToEntity(productDto, newProduct);
 2. Binding Mode:
-
-  2.1 TwoWay: it will create the property map from entity to dto and reverse map (from dto to entity)
-  
-  2.2 OneWayToDto: it will create only one way map from entity to dto (read only)
-  
-  2.2 OneWayToEntity: it will create only one way map from dto to entity (for update)
+  - 2.1 TwoWay: it will create the property map from entity to dto and reverse map (from dto to entity)
+  - 2.2 OneWayToDto: it will create only one way map from entity to dto (read only)  
+  - 2.2 OneWayToEntity: it will create only one way map from dto to entity (for update)
 3. Use PrimaryKey = true, it means that property or properties are ids, you can get the ids by using DtoObject.GetIds(productDto) (return an object array)
 4. All dto objects are implemented interface IDtoObject
 5. For example above, you don't need to decare two classes Category and Tag if the dto structure of the classes are the same with entities 

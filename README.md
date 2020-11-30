@@ -42,7 +42,7 @@ public class Tag
 }
 ```
 #### Sample Json Data of product
-``` json
+``` javascript
 {
 	id: 1,
 	code: 'P01',
@@ -116,7 +116,7 @@ Mapper.MapFromEntityToDto(productDto, product);
 var resultJson = JsonConvert.SerializeObject(productDto);
 ```
 #### resultJson
-``` json
+``` javascript
 {
 	id: 1,
 	code: 'P01',
@@ -127,7 +127,7 @@ var resultJson = JsonConvert.SerializeObject(productDto);
 		information: 'Product information'
 	},
 	sku: 'VN_HCM',
-  categoryName: 'Mobile',
+	categoryName: 'Mobile',
 	category: {
 		id: 1220,
 		categoryName: 'Mobile'

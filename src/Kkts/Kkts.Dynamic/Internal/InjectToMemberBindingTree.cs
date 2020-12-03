@@ -28,7 +28,7 @@ namespace Kkts.Dynamic.Internal
 
         private InjectToMemberBindingTree()
         {
-            _tree = new Dictionary<string, InjectToMemberBindingTree>();
+            _tree = new Dictionary<string, InjectToMemberBindingTree>(StringComparer.OrdinalIgnoreCase);
             _memberBindings = new List<(string, MemberTree, MemberTree, AlternationInfo)>();
         }
 
@@ -84,7 +84,7 @@ namespace Kkts.Dynamic.Internal
             }
 
             segment = segments[segments.Length - 1];
-            if (!current._memberBindings.Any(p => p.Name == segment))
+            if (!current._memberBindings.Any(p => p.Name.Equals(segment, StringComparison.OrdinalIgnoreCase)))
             {
                 targetMember = current._targetMemberTree.PropertyOrField(segment);
                 if (targetMember.IsProperty && !targetMember.Property.CanWrite) throw new InvalidOperationException(errorMessage);

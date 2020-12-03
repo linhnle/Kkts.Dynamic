@@ -8,7 +8,7 @@ namespace Kkts.Dynamic.Internal
 {
     internal class SelectMemberBindingExpressionTree : IDisposable
     {
-        private readonly SelectSourceMemberExpressionTree _sourceMemberTree;
+        private SelectSourceMemberExpressionTree _sourceMemberTree;
         private readonly Type _targetType;
         private Type _sourceType;
         private readonly Dictionary<string, (MemberInfo Member, SelectMemberBindingExpressionTree Tree)> _tree;
@@ -32,21 +32,39 @@ namespace Kkts.Dynamic.Internal
             foreach (var binding in bindings)
             {
                 if (binding.Mode == BindingMode.OneWayToEntity) continue;
-                Bind(binding.EntityProperty, binding.DtoProperty ?? binding.EntityProperty);
+                Bind(binding.EntityProperty, binding.DtoProperty ?? binding.EntityProperty, binding.Alternation);
             }
         }
 
-        private void Bind(string sourceProperty, string targetProperty)
+        private void Bind(string sourceProperty, string targetProperty, AlternationInfo alternation)
         {
             var sourceMember = _sourceMemberTree.Property(sourceProperty);
-            if (!sourceMember.MemberExpression.Member.IsPrimitive()) return;
+            if (!sourceMember.MemberExpression.Member.IsPrimitive() 
+                && alternation.PropertyType != SpecialPropertyType.Alternative)
+            {
+                return;
+            }
+            
             MemberInfo member;
             if (targetProperty.IndexOf('.') == -1)
             {
-                if (!_memberBindings.Any(p => p.Member.Name == targetProperty))
+                if (_memberBindings.Any(p => p.Member.EqualsName(targetProperty))) return;
+
+                if (alternation.PropertyType == SpecialPropertyType.Alternative)
                 {
-                    member = (MemberInfo)_targetType.GetProperty(targetProperty) ?? _targetType.GetField(targetProperty);
-                    if (member == null) throw new InvalidOperationException($"The property or field {targetProperty} does not exist, it is related to {_sourceType.FullName}");
+                    member = _targetType.GetMemberInfo(targetProperty)
+                        ?? throw new InvalidOperationException($"The property {targetProperty} does not exist in type {_targetType.FullName}");
+                    var memberType = member.GetMemberType();
+                    var element = new SelectMemberBindingExpressionTree(memberType);
+                    element._sourceType = sourceMember.MemberExpression.Member.GetMemberType();
+                    element._sourceMemberTree = sourceMember;
+                    _tree.Add(targetProperty, (member, element));
+                    element.Bind(alternation.Cls.Bindings);
+                }
+                else
+                {
+                    member = _targetType.GetMemberInfo(targetProperty)
+                        ?? throw new InvalidOperationException($"The property or field {targetProperty} does not exist, it is related to {_sourceType.FullName}");
                     var memberBinding = Expression.Bind(member, sourceMember.MemberExpression);
                     _memberBindings.Add(memberBinding);
                 }
@@ -68,8 +86,8 @@ namespace Kkts.Dynamic.Internal
                 }
                 else
                 {
-                    member = (MemberInfo)currentType.GetProperty(segment) ?? currentType.GetField(segment);
-                    if (member == null) throw new InvalidOperationException($"The property {targetProperty} does not exist in type {_targetType.FullName}");
+                    member = currentType.GetMemberInfo(segment) 
+                        ?? throw new InvalidOperationException($"The property {targetProperty} does not exist in type {_targetType.FullName}");
                     currentType = member.GetMemberType();
                     var element = new SelectMemberBindingExpressionTree(currentType);
                     element._sourceType = current._sourceType;
@@ -79,9 +97,22 @@ namespace Kkts.Dynamic.Internal
             }
 
             segment = segments[segments.Length - 1];
-            if (!current._memberBindings.Any(p => p.Member.Name == segment))
+            if (current._memberBindings.Any(p => p.Member.EqualsName(segment))) return;
+
+            if (alternation.PropertyType == SpecialPropertyType.Alternative)
             {
-                member = (MemberInfo)currentType.GetProperty(segment) ?? currentType.GetField(segment);
+                member = currentType.GetMemberInfo(segment)
+                        ?? throw new InvalidOperationException($"The property {targetProperty} does not exist in type {_targetType.FullName}");
+                var memberType = member.GetMemberType();
+                var element = new SelectMemberBindingExpressionTree(memberType);
+                element._sourceType = sourceMember.MemberExpression.Member.GetMemberType();
+                element._sourceMemberTree = sourceMember;
+                current._tree.Add(segment, (member, element));
+                element.Bind(alternation.Cls.Bindings);
+            }
+            else
+            {
+                member = currentType.GetMemberInfo(segment);
                 current._memberBindings.Add(Expression.Bind(member, sourceMember.MemberExpression));
             }
         }

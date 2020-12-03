@@ -34,5 +34,10 @@ namespace Kkts.Dynamic.Internal
 				|| conversionType == typeof(byte[])
 				|| conversionType == typeof(Guid);
 		}
+
+		public static bool EqualsName(this MemberInfo memberInfo, string name)
+		{
+			return memberInfo.Name.Equals(name, StringComparison.OrdinalIgnoreCase);
+		}
 	}
 }

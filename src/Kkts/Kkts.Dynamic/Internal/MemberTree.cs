@@ -67,14 +67,14 @@ namespace Kkts.Dynamic.Internal
                 }
                 else
                 {
-                    var property = currentType.GetProperty(segment);
+                    var property = currentType.GetProperty(segment, TypeExtensions.BindingFlags);
                     var declaredType = property?.PropertyType;
                     FieldInfo field = null;
                     var isProp = true;
                     if (property == null)
                     {
                         isProp = false;
-                        field = currentType.GetField(segment) ?? throw new InvalidOperationException($"The property or field '{name}' does not exist in '{_declaredType.FullName}'");
+                        field = currentType.GetField(segment, TypeExtensions.BindingFlags) ?? throw new InvalidOperationException($"The property or field '{name}' does not exist in '{_declaredType.FullName}'");
                         declaredType = field.FieldType;
                     }
 

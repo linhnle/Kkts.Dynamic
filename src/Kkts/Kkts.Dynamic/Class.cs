@@ -37,7 +37,7 @@ namespace Kkts.Dynamic
             _bindings = bindings;
             _isInternal = mappingType == null;
             _mappingTypeMember = new MemberTree(_mappingType);
-            _propertyBuilders = new Dictionary<string, PropertyBuilder>();
+            _propertyBuilders = new Dictionary<string, PropertyBuilder>(StringComparer.OrdinalIgnoreCase);
             _subClasses = new Dictionary<string, Class>();
             _alternativeProperties = new Dictionary<string, Class>();
             _ctorBuilder = DeclareConstructor();
@@ -55,6 +55,8 @@ namespace Kkts.Dynamic
 
         internal TypeBuilder TypeBuilder => _typeBuilder;
 
+        internal IEnumerable<PropertyBinding> Bindings => _bindings;
+
         public Type GetBuiltType()
         {
             return BuildType();
@@ -66,6 +68,7 @@ namespace Kkts.Dynamic
             _subClasses.Clear();
             _alternativeProperties.Clear();
             _propertyBuilders.Clear();
+            
         }
 
         internal Type BuildType()
@@ -86,12 +89,14 @@ namespace Kkts.Dynamic
             if (_type == null) throw new InvalidOperationException($"Should call BuildType before calling {nameof(BuildSelectorExpression)}");
             if (_selector != null) return _selector;
             var param = Expression.Parameter(_mappingType, "p");
-            var bindingTree = new SelectMemberBindingExpressionTree(param, _type);
-            bindingTree.Bind(_bindings);
-            var body = bindingTree.Build();
-            _selector = Expression.Lambda(body, param);
+            using (var bindingTree = new SelectMemberBindingExpressionTree(param, _type))
+            {
+                bindingTree.Bind(_bindings);
+                var body = bindingTree.Build();
+                _selector = Expression.Lambda(body, param);
 
-            return _selector;
+                return _selector;
+            }
         }
 
         internal void BuildProperties()
@@ -452,6 +457,17 @@ namespace Kkts.Dynamic
         void IDisposable.Dispose()
         {
             Clear();
+            if (_bindings != null)
+            {
+                foreach (var binding in _bindings)
+                {
+                    if (binding.Alternation != null)
+                    {
+                        binding.Alternation.Cls = null;
+                        binding.Alternation = null;
+                    }
+                }
+            }
         }
     }
 }

@@ -13,6 +13,7 @@ namespace Kkts.Dynamic.Internal
         private Type _sourceType;
         private readonly Dictionary<string, (MemberInfo Member, SelectMemberBindingExpressionTree Tree)> _tree;
         private readonly List<MemberAssignment> _memberBindings;
+        private int _level;
 
         public SelectMemberBindingExpressionTree(ParameterExpression param, Type targetType)
         {
@@ -23,8 +24,9 @@ namespace Kkts.Dynamic.Internal
             _memberBindings = new List<MemberAssignment>();
         }
 
-        private SelectMemberBindingExpressionTree(Type targetType) : this(null, targetType)
+        private SelectMemberBindingExpressionTree(Type targetType, int level) : this(null, targetType)
         {
+            _level = level;
         }
 
         public void Bind(IEnumerable<PropertyBinding> bindings)
@@ -44,6 +46,11 @@ namespace Kkts.Dynamic.Internal
             {
                 return;
             }
+
+            if (alternation.PropertyType == SpecialPropertyType.Alternative && _level == Class.MaxRecursionDepthToBuildSelectorExpression)
+            {
+                return;
+            }
             
             MemberInfo member;
             if (targetProperty.IndexOf('.') == -1)
@@ -55,7 +62,7 @@ namespace Kkts.Dynamic.Internal
                     member = _targetType.GetMemberInfo(targetProperty)
                         ?? throw new InvalidOperationException($"The property {targetProperty} does not exist in type {_targetType.FullName}");
                     var memberType = member.GetMemberType();
-                    var element = new SelectMemberBindingExpressionTree(memberType);
+                    var element = new SelectMemberBindingExpressionTree(memberType, _level + 1);
                     element._sourceType = sourceMember.MemberExpression.Member.GetMemberType();
                     element._sourceMemberTree = sourceMember;
                     _tree.Add(targetProperty, (member, element));
@@ -89,7 +96,7 @@ namespace Kkts.Dynamic.Internal
                     member = currentType.GetMemberInfo(segment) 
                         ?? throw new InvalidOperationException($"The property {targetProperty} does not exist in type {_targetType.FullName}");
                     currentType = member.GetMemberType();
-                    var element = new SelectMemberBindingExpressionTree(currentType);
+                    var element = new SelectMemberBindingExpressionTree(currentType, i);
                     element._sourceType = current._sourceType;
                     current._tree.Add(segment, (member, element));
                     current = element;
@@ -104,7 +111,7 @@ namespace Kkts.Dynamic.Internal
                 member = currentType.GetMemberInfo(segment)
                         ?? throw new InvalidOperationException($"The property {targetProperty} does not exist in type {_targetType.FullName}");
                 var memberType = member.GetMemberType();
-                var element = new SelectMemberBindingExpressionTree(memberType);
+                var element = new SelectMemberBindingExpressionTree(memberType, segments.Length - 1);
                 element._sourceType = sourceMember.MemberExpression.Member.GetMemberType();
                 element._sourceMemberTree = sourceMember;
                 current._tree.Add(segment, (member, element));

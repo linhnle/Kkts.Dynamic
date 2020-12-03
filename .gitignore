@@ -6,3 +6,5 @@
 /src/Kkts/Kkts.Dynamic/bin/Debug/netstandard2.0
 /src/Kkts/Kkts.Dynamic/obj
 /src/Kkts/Kkts.Dynamic/bin/Release
+/src/Kkts/Kkts.Dynamic.UnitTest/bin
+/src/Kkts/Kkts.Dynamic.UnitTest/obj

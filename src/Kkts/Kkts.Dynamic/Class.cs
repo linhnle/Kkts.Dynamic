@@ -10,6 +10,7 @@ namespace Kkts.Dynamic
 {
     public sealed class Class : IDisposable
     {
+        public static uint MaxRecursionDepthToBuildSelectorExpression = 4;
         public const string InjectFromMethodName = "__Inject_From__";
         public const string InjectToMethodName = "__Inject_To__";
         public const string GetIdsMethodName = "__Get_Ids__";

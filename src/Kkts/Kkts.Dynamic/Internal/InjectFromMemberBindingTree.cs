@@ -160,7 +160,7 @@ namespace Kkts.Dynamic.Internal
                     {
                         BuildCollectionNestedPropertyMap(generator, binding, isFirstBinding, Mapper.ToDtoArrayMethodInfo);
                     }
-                    else if (binding.Alternation.PropertyType == SpecialPropertyType.Array)
+                    else if (binding.Alternation.PropertyType == SpecialPropertyType.Collection)
                     {
                         BuildCollectionNestedPropertyMap(generator, binding, isFirstBinding, Mapper.ToDtoCollectionMethodInfo);
                     }
@@ -282,7 +282,7 @@ namespace Kkts.Dynamic.Internal
             generator.Emit(OpCodes.Ldarg_1);
             var byPass = false;
             binding.Source.BuildGet(generator, ref nothing, ref afterSetPoint, true, ref byPass, false);
-            generator.Emit(OpCodes.Pop);
+            generator.Emit(OpCodes.Brfalse, afterSetPoint);
             generator.Emit(OpCodes.Nop);
             generator.Emit(OpCodes.Ldarg_0);
             generator.Emit(OpCodes.Newobj, binding.Alternation.AlternativeCtor);
@@ -301,6 +301,7 @@ namespace Kkts.Dynamic.Internal
         {
             var afterSetPoint = generator.DefineLabel();
             var nothing = generator.DefineLabel();
+            var endIf = generator.DefineLabel();
             if (!isFirstBinding)
             {
                 generator.Emit(OpCodes.Nop);
@@ -309,16 +310,19 @@ namespace Kkts.Dynamic.Internal
             generator.Emit(OpCodes.Ldarg_1);
             var byPass = false;
             binding.Source.BuildGet(generator, ref nothing, ref afterSetPoint, true, ref byPass, false);
-            generator.Emit(OpCodes.Pop);
+            generator.Emit(OpCodes.Brfalse, endIf);
             generator.Emit(OpCodes.Nop);
+            generator.Emit(OpCodes.Dup);
             generator.Emit(OpCodes.Newobj, binding.Alternation.AlternativeCtor);
             generator.Emit(OpCodes.Call, binding.PI.SetMethod);
             generator.Emit(OpCodes.Nop);
-            generator.Emit(OpCodes.Dup);
             generator.Emit(OpCodes.Call, binding.PI.GetMethod);
             generator.Emit(OpCodes.Ldarg_1);
             binding.Source.BuildGet(generator, ref nothing, ref afterSetPoint, true, ref byPass, true);
             generator.Emit(OpCodes.Call, Mapper.MapFromEntityToDtoMethodInfo);
+            generator.Emit(OpCodes.Br, afterSetPoint);
+            generator.MarkLabel(endIf);
+            generator.Emit(OpCodes.Pop);
             generator.MarkLabel(afterSetPoint);
         }
 

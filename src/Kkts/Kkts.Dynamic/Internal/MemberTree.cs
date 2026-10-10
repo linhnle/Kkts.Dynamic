@@ -6,9 +6,9 @@ using System.Reflection.Emit;
 
 namespace Kkts.Dynamic.Internal
 {
-    internal class MemberTree : IDisposable
+    internal sealed class MemberTree : IDisposable
     {
-        private readonly Dictionary<string, MemberTree> _tree = new Dictionary<string, MemberTree>();
+        private readonly Dictionary<string, MemberTree> _tree = new Dictionary<string, MemberTree>(StringComparer.OrdinalIgnoreCase);
         private readonly Type _declaredType;
         private MemberTree _parent;
         private Class _cls;
@@ -100,7 +100,6 @@ namespace Kkts.Dynamic.Internal
             var segments = name.Split('.');
             var current = this;
             var currentCls = _cls;
-            var propName = string.Empty;
             for (var i = 0; i < segments.Length; ++i)
             {
                 var segment = segments[i];
@@ -111,48 +110,29 @@ namespace Kkts.Dynamic.Internal
                 }
                 else
                 {
-                    MemberTree element;
-                    PropertyBuilder property;
-                    Class cls;
-                    if (i == segments.Length - 1)
-                    {
-                        if (!currentCls.PropertyBuilders.ContainsKey(segment)) throw new InvalidOperationException($"The property or field '{name}' does not exist in '{_cls.Name}'");
-                        property = currentCls.PropertyBuilders[segment];
-                        cls = current._cls.SubClasses.ContainsKey(segment) ? current._cls.SubClasses[segment] : current._cls;
-                        var type = property.PropertyType;
-                        element = new MemberTree(type, current)
-                        {
-                            _cls = cls,
-                            Property = property,
-                            IsProperty = true,
-                            Name = segment
-                        };
-                        current._tree.Add(segment, element);
-                        current = element;
-
-                        break;
-                    }
-
-                    propName = propName == string.Empty ? segment : $"{propName}.{segment}";
-                    if (!currentCls.PropertyBuilders.ContainsKey(segment)) throw new InvalidOperationException($"The property or field '{name}' does not exist in '{_cls.Name}'");
-                    cls = current._cls.SubClasses[segment];
-                    property = currentCls.PropertyBuilders[segment];
-                    var declaredType = property.PropertyType;
-                    element = new MemberTree(declaredType, current)
-                    {
-                        _cls = cls,
-                        Property = property,
-                        IsProperty = true,
-                        Name = segment
-                    };
-
+                    var element = CreateClassMember(current, currentCls, segment, name, i == segments.Length - 1);
                     current._tree.Add(segment, element);
-                    currentCls = cls;
                     current = element;
+                    currentCls = element._cls;
                 }
             }
 
             return current;
+        }
+
+        private MemberTree CreateClassMember(MemberTree parent, Class cls, string segment, string path, bool isLeaf)
+        {
+            if (!cls.PropertyBuilders.TryGetValue(segment, out var property))
+                throw new InvalidOperationException($"The property or field '{path}' does not exist in '{_cls.Name}'");
+            var memberClass = isLeaf && !parent._cls.SubClasses.ContainsKey(segment)
+                ? parent._cls : parent._cls.SubClasses[segment];
+            return new MemberTree(property.PropertyType, parent)
+            {
+                _cls = memberClass,
+                Property = property,
+                IsProperty = true,
+                Name = segment
+            };
         }
 
         internal void BuildGet(ILGenerator generator, ref Label jumpPoint, ref Label afterSetPoint, bool topmost, ref bool isParentNullable, bool ignoreNullableCheck)
@@ -192,7 +172,7 @@ namespace Kkts.Dynamic.Internal
 
         private bool IsNullable()
         {
-            return Nullable.GetUnderlyingType(_declaredType) != null || _declaredType.IsClass;
+            return Nullable.GetUnderlyingType(_declaredType) != null || !_declaredType.IsValueType;
         }
 
         void IDisposable.Dispose()

@@ -4,17 +4,19 @@
     <TargetFramework>netstandard2.0</TargetFramework>
     <Authors>Linh Le</Authors>
     <Company>KKTS Ltd.</Company>
-    <Description>A lightweight and dynamic mapper, you don't need to declare any classes for View Model or Data Transfer Object, just declare property bindings</Description>
+    <Description>Generate DTO and view-model types at runtime from property bindings. Map between entities and generated DTOs with two-way mapping, nested property paths, collections, primary-key extraction, and LINQ projection expressions. Targets .NET Standard 2.0.</Description>
     <Copyright>Copyright (C) 2016-2020 KKTS Ltd.</Copyright>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/linhnle/Kkts.Dynamic</PackageProjectUrl>
     <RepositoryUrl>https://github.com/linhnle/Kkts.Dynamic.git</RepositoryUrl>
     <RepositoryType>Git</RepositoryType>
-    <PackageTags>Mapper, DynamicMapper, AnonymousType</PackageTags>
-    <Version>1.0.1</Version>
+    <PackageTags>mapper;object-mapping;dynamic;dto;viewmodel;runtime-code-generation;reflection-emit;linq;projection;netstandard</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <Version>1.1.0</Version>
   </PropertyGroup>
 
   <ItemGroup>
+    <None Include="../../../README.md" Pack="true" PackagePath="/" />
     <PackageReference Include="System.Reflection.Emit" Version="4.7.0" />
   </ItemGroup>
 

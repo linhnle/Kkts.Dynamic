@@ -6,7 +6,7 @@ using System.Reflection.Emit;
 
 namespace Kkts.Dynamic.Internal
 {
-    internal class InjectFromMemberBindingTree : IDisposable
+    internal sealed class InjectFromMemberBindingTree : IDisposable
     {
         private MemberTree _sourceMemberTree;
         private Type _sourceType;
@@ -51,7 +51,7 @@ namespace Kkts.Dynamic.Internal
         private void Bind(string sourceProperty, string targetProperty, AlternationInfo alternation)
         {
             var sourceMember = _sourceMemberTree.PropertyOrField(sourceProperty);
-            if (sourceMember.IsProperty && !sourceMember.Property.CanWrite) throw new InvalidOperationException($"The property {sourceProperty} of type {_sourceType.FullName} does not have get accessor");
+            if (sourceMember.IsProperty && sourceMember.Property.GetGetMethod() == null) throw new InvalidOperationException($"The property {sourceProperty} of type {_sourceType.FullName} does not have a public get accessor");
             var errorMessage = $"The property {targetProperty} does not exist, it is related to entity {_sourceType.FullName}";
             if (targetProperty.IndexOf('.') == -1)
             {
@@ -68,20 +68,7 @@ namespace Kkts.Dynamic.Internal
             {
                 segment = segments[i];
                 propName = propName == string.Empty ? segment : $"{propName}.{segment}";
-                if (current._tree.ContainsKey(segment))
-                {
-                    current = current._tree[segment];
-                }
-                else
-                {
-                    if (!current._cls.PropertyBuilders.ContainsKey(segment)) throw new InvalidOperationException(errorMessage);
-                    var cls = current._rootCls.SubClasses[propName];
-                    var element = new InjectFromMemberBindingTree(current._rootCls, cls, current._cls);
-                    element._sourceType = current._sourceType;
-                    element._sourceMemberTree = sourceMember;
-                    current._tree.Add(segment, element);
-                    current = element;
-                }
+                current = current.GetOrAddChild(segment, propName, sourceMember, errorMessage);
             }
 
             segment = segments[segments.Length - 1];
@@ -92,6 +79,19 @@ namespace Kkts.Dynamic.Internal
             }
         }
 
+        private InjectFromMemberBindingTree GetOrAddChild(string segment, string path, MemberTree source, string errorMessage)
+        {
+            if (_tree.TryGetValue(segment, out var existing)) return existing;
+            if (!_cls.PropertyBuilders.ContainsKey(segment)) throw new InvalidOperationException(errorMessage);
+            var element = new InjectFromMemberBindingTree(_rootCls, _rootCls.SubClasses[path], _cls)
+            {
+                _sourceType = _sourceType,
+                _sourceMemberTree = source
+            };
+            _tree.Add(segment, element);
+            return element;
+        }
+
         private TreeEvaluationResult CheckHasTheSameParent()
         {
             var result = new TreeEvaluationResult();
@@ -99,7 +99,7 @@ namespace Kkts.Dynamic.Internal
             var memberBinding = _memberBindings[0];
             var parents = new List<MemberTree>();
             var parent = memberBinding.Source.Parent;
-            while(parent != null && !parent.IsRoot)
+            while (parent != null && !parent.IsRoot)
             {
                 parents.Add(parent);
                 parent = parent.Parent;
@@ -116,7 +116,7 @@ namespace Kkts.Dynamic.Internal
                     parent = parent.Parent;
                 }
 
-                if (!parent.IsRoot == true) return result;
+                if (parent == null || !parent.IsRoot) return result;
             }
 
             parents.Reverse();
@@ -133,104 +133,96 @@ namespace Kkts.Dynamic.Internal
             {
                 if (_isRoot)
                 {
-                    if (binding.Alternation.PropertyType == SpecialPropertyType.Alternative)
-                    {
-                        BuildAlternativePropertyMap(generator, binding);
-                    }
-                    else if (binding.Alternation.PropertyType == SpecialPropertyType.Array)
-                    {
-                        BuildCollectionPropertyMap(generator, binding, Mapper.ToDtoArrayMethodInfo);
-                    }
-                    else if (binding.Alternation.PropertyType == SpecialPropertyType.Collection)
-                    {
-                        BuildCollectionPropertyMap(generator, binding, Mapper.ToDtoCollectionMethodInfo);
-                    }
-                    else
-                    {
-                        BuildPropertyMap(generator, binding);
-                    }
+                    BuildRootBinding(generator, binding);
                 }
                 else
                 {
-                    if (binding.Alternation.PropertyType == SpecialPropertyType.Alternative)
-                    {
-                        BuildAlternativeNestedPropertyMap(generator, binding, isFirstBinding);
-                    }
-                    else if (binding.Alternation.PropertyType == SpecialPropertyType.Array)
-                    {
-                        BuildCollectionNestedPropertyMap(generator, binding, isFirstBinding, Mapper.ToDtoArrayMethodInfo);
-                    }
-                    else if (binding.Alternation.PropertyType == SpecialPropertyType.Collection)
-                    {
-                        BuildCollectionNestedPropertyMap(generator, binding, isFirstBinding, Mapper.ToDtoCollectionMethodInfo);
-                    }
-                    else
-                    {
-                        BuildNestedPropertyMap(generator, binding, isFirstBinding);
-                    }
-
+                    BuildNestedBinding(generator, binding, isFirstBinding);
                     isFirstBinding = false;
                 }
             }
 
             foreach (var item in _tree)
             {
-                var endIf = generator.DefineLabel();
-                var hasTheSameParent = item.Value.CheckHasTheSameParent();
-                if (hasTheSameParent.HasTheSameParent)
-                {
-                    generator.Emit(OpCodes.Nop);
-                    for (var i = 0; i < hasTheSameParent.Parents.Count; ++i)
-                    {
-                        generator.Emit(OpCodes.Ldarg_1);
-                        for (var j = 0; j < i + 1; ++j)
-                        {
-                            var parent = hasTheSameParent.Parents[j];
-                            if (parent.IsProperty)
-                            {
-                                generator.Emit(OpCodes.Callvirt, parent.Property.GetMethod);
-                            }
-                            else
-                            {
-                                generator.Emit(OpCodes.Ldfld, parent.Field);
-                            }
-                        }
-                        generator.Emit(OpCodes.Brfalse, endIf);
-                    }
-                }
-                generator.Emit(OpCodes.Nop);
-                if (_isRoot)
-                {
-                    generator.Emit(OpCodes.Ldarg_0);
-                }
-                else
-                {
-                    generator.Emit(OpCodes.Dup);
-                }
-
-                generator.Emit(OpCodes.Newobj, item.Value._cls.Constructor);
-
-                item.Value.Build(generator);
-
-                generator.Emit(OpCodes.Nop);
-                var setMethod = item.Value._parent.PropertyBuilders[item.Key].SetMethod;
-                if (_isRoot)
-                {
-                    generator.Emit(OpCodes.Call, setMethod);
-                }
-                else
-                {
-                    generator.Emit(OpCodes.Callvirt, setMethod);
-                }
-
-                if (hasTheSameParent.HasTheSameParent)
-                {
-                    generator.MarkLabel(endIf);
-                }
+                BuildChild(generator, item.Key, item.Value);
             }
         }
 
-        private void BuildCollectionPropertyMap(ILGenerator generator, (string Name, PropertyInfo PI, MemberTree Source, AlternationInfo Alternation) binding, MethodInfo mapper)
+        private static void BuildRootBinding(ILGenerator generator, (string Name, PropertyInfo PI, MemberTree Source, AlternationInfo Alternation) binding)
+        {
+            switch (binding.Alternation.PropertyType)
+            {
+                case SpecialPropertyType.Alternative:
+                    BuildAlternativePropertyMap(generator, binding);
+                    break;
+                case SpecialPropertyType.Array:
+                    BuildCollectionPropertyMap(generator, binding, Mapper.ToDtoArrayMethodInfo);
+                    break;
+                case SpecialPropertyType.Collection:
+                    BuildCollectionPropertyMap(generator, binding, Mapper.ToDtoCollectionMethodInfo);
+                    break;
+                default:
+                    BuildPropertyMap(generator, binding);
+                    break;
+            }
+        }
+
+        private static void BuildNestedBinding(ILGenerator generator, (string Name, PropertyInfo PI, MemberTree Source, AlternationInfo Alternation) binding, bool isFirstBinding)
+        {
+            switch (binding.Alternation.PropertyType)
+            {
+                case SpecialPropertyType.Alternative:
+                    BuildAlternativeNestedPropertyMap(generator, binding, isFirstBinding);
+                    break;
+                case SpecialPropertyType.Array:
+                    BuildCollectionNestedPropertyMap(generator, binding, isFirstBinding, Mapper.ToDtoArrayMethodInfo);
+                    break;
+                case SpecialPropertyType.Collection:
+                    BuildCollectionNestedPropertyMap(generator, binding, isFirstBinding, Mapper.ToDtoCollectionMethodInfo);
+                    break;
+                default:
+                    BuildNestedPropertyMap(generator, binding, isFirstBinding);
+                    break;
+            }
+        }
+
+        private void BuildChild(ILGenerator generator, string name, InjectFromMemberBindingTree child)
+        {
+            var endIf = generator.DefineLabel();
+            var hasTheSameParent = child.CheckHasTheSameParent();
+            hasTheSameParent.BuildParentGuard(generator, OpCodes.Ldarg_1, endIf);
+            generator.Emit(OpCodes.Nop);
+            if (_isRoot)
+            {
+                generator.Emit(OpCodes.Ldarg_0);
+            }
+            else
+            {
+                generator.Emit(OpCodes.Dup);
+            }
+
+            generator.Emit(OpCodes.Newobj, child._cls.Constructor);
+
+            child.Build(generator);
+
+            generator.Emit(OpCodes.Nop);
+            var setMethod = child._parent.PropertyBuilders[name].SetMethod;
+            if (_isRoot)
+            {
+                generator.Emit(OpCodes.Call, setMethod);
+            }
+            else
+            {
+                generator.Emit(OpCodes.Callvirt, setMethod);
+            }
+
+            if (hasTheSameParent.HasTheSameParent)
+            {
+                generator.MarkLabel(endIf);
+            }
+        }
+
+        private static void BuildCollectionPropertyMap(ILGenerator generator, (string Name, PropertyInfo PI, MemberTree Source, AlternationInfo Alternation) binding, MethodInfo mapper)
         {
             var afterSetPoint = generator.DefineLabel();
             var nothing = generator.DefineLabel();
@@ -251,7 +243,7 @@ namespace Kkts.Dynamic.Internal
             generator.Emit(OpCodes.Nop);
         }
 
-        private void BuildCollectionNestedPropertyMap(ILGenerator generator, (string Name, PropertyInfo PI, MemberTree Source, AlternationInfo Alternation) binding, bool isFirstBinding, MethodInfo mapper)
+        private static void BuildCollectionNestedPropertyMap(ILGenerator generator, (string Name, PropertyInfo PI, MemberTree Source, AlternationInfo Alternation) binding, bool isFirstBinding, MethodInfo mapper)
         {
             var afterSetPoint = generator.DefineLabel();
             var nothing = generator.DefineLabel();
@@ -274,7 +266,7 @@ namespace Kkts.Dynamic.Internal
             generator.MarkLabel(afterSetPoint);
         }
 
-        private void BuildAlternativePropertyMap(ILGenerator generator, (string Name, PropertyInfo PI, MemberTree Source, AlternationInfo Alternation) binding)
+        private static void BuildAlternativePropertyMap(ILGenerator generator, (string Name, PropertyInfo PI, MemberTree Source, AlternationInfo Alternation) binding)
         {
             var afterSetPoint = generator.DefineLabel();
             var nothing = generator.DefineLabel();
@@ -297,7 +289,7 @@ namespace Kkts.Dynamic.Internal
             generator.Emit(OpCodes.Nop);
         }
 
-        private void BuildAlternativeNestedPropertyMap(ILGenerator generator, (string Name, PropertyInfo PI, MemberTree Source, AlternationInfo Alternation) binding, bool isFirstBinding)
+        private static void BuildAlternativeNestedPropertyMap(ILGenerator generator, (string Name, PropertyInfo PI, MemberTree Source, AlternationInfo Alternation) binding, bool isFirstBinding)
         {
             var afterSetPoint = generator.DefineLabel();
             var nothing = generator.DefineLabel();
@@ -326,7 +318,7 @@ namespace Kkts.Dynamic.Internal
             generator.MarkLabel(afterSetPoint);
         }
 
-        private void BuildPropertyMap(ILGenerator generator, (string Name, PropertyInfo PI, MemberTree Source, AlternationInfo Alternation) binding)
+        private static void BuildPropertyMap(ILGenerator generator, (string Name, PropertyInfo PI, MemberTree Source, AlternationInfo Alternation) binding)
         {
             var afterSetPoint = generator.DefineLabel();
             var nothing = generator.DefineLabel();
@@ -340,7 +332,7 @@ namespace Kkts.Dynamic.Internal
             generator.Emit(OpCodes.Nop);
         }
 
-        private void BuildNestedPropertyMap(ILGenerator generator, (string Name, PropertyInfo PI, MemberTree Source, AlternationInfo Alternation) binding, bool isFirstBinding)
+        private static void BuildNestedPropertyMap(ILGenerator generator, (string Name, PropertyInfo PI, MemberTree Source, AlternationInfo Alternation) binding, bool isFirstBinding)
         {
             var afterSetPoint = generator.DefineLabel();
             var nothing = generator.DefineLabel();

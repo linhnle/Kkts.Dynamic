@@ -6,12 +6,11 @@ using System.Reflection.Emit;
 
 namespace Kkts.Dynamic.Internal
 {
-    internal class InjectToMemberBindingTree : IDisposable
+    internal sealed class InjectToMemberBindingTree : IDisposable
     {
         private MemberTree _targetMemberTree;
-        private MemberTree _sourceMemberTree;
+        private readonly MemberTree _sourceMemberTree;
         private Type _targetType;
-        private Class _cls;
         private Class _rootCls;
         private readonly Dictionary<string, InjectToMemberBindingTree> _tree;
         private readonly List<(string Name, MemberTree Target, MemberTree Source, AlternationInfo Alternation)> _memberBindings;
@@ -34,9 +33,8 @@ namespace Kkts.Dynamic.Internal
 
         private InjectToMemberBindingTree(Class rootCls, Class cls) : this()
         {
-            _cls = cls;
             _rootCls = rootCls;
-            _sourceMemberTree = new MemberTree(_cls);
+            _sourceMemberTree = new MemberTree(cls);
         }
 
         public void Bind(IEnumerable<PropertyBinding> bindings)
@@ -66,21 +64,7 @@ namespace Kkts.Dynamic.Internal
             for (var i = 0; i < segments.Length - 1; ++i)
             {
                 segment = segments[i];
-                if (current._tree.ContainsKey(segment))
-                {
-                    current = current._tree[segment];
-                }
-                else
-                {
-                    targetMember = current._targetMemberTree.PropertyOrField(segment);
-                    var cls = sourceMember.Cls;
-                    if (targetMember.IsProperty && !targetMember.Property.CanWrite) throw new InvalidOperationException(errorMessage);
-                    var element = new InjectToMemberBindingTree(current._rootCls, cls);
-                    element._targetType = targetMember.PropertyOrFieldType;
-                    element._targetMemberTree = targetMember;
-                    current._tree.Add(segment, element);
-                    current = element;
-                }
+                current = current.GetOrAddChild(segment, sourceMember.Cls, errorMessage);
             }
 
             segment = segments[segments.Length - 1];
@@ -90,6 +74,20 @@ namespace Kkts.Dynamic.Internal
                 if (targetMember.IsProperty && !targetMember.Property.CanWrite) throw new InvalidOperationException(errorMessage);
                 current._memberBindings.Add((segment, targetMember, sourceMember, alternation));
             }
+        }
+
+        private InjectToMemberBindingTree GetOrAddChild(string segment, Class cls, string errorMessage)
+        {
+            if (_tree.TryGetValue(segment, out var existing)) return existing;
+            var target = _targetMemberTree.PropertyOrField(segment);
+            if (target.IsProperty && !target.Property.CanWrite) throw new InvalidOperationException(errorMessage);
+            var element = new InjectToMemberBindingTree(_rootCls, cls)
+            {
+                _targetType = target.PropertyOrFieldType,
+                _targetMemberTree = target
+            };
+            _tree.Add(segment, element);
+            return element;
         }
 
         private TreeEvaluationResult CheckHasTheSameParent()
@@ -116,7 +114,7 @@ namespace Kkts.Dynamic.Internal
                     parent = parent.Parent;
                 }
 
-                if (!parent.IsRoot == true) return result;
+                if (parent == null || !parent.IsRoot) return result;
             }
 
             parents.Reverse();
@@ -133,148 +131,139 @@ namespace Kkts.Dynamic.Internal
             {
                 if (_isRoot)
                 {
-                    if (binding.Alternation.PropertyType == SpecialPropertyType.Alternative)
-                    {
-                        BuildAlternativePropertyMap(generator, binding);
-                    }
-                    else if (binding.Alternation.PropertyType == SpecialPropertyType.Array)
-                    {
-                        BuildCollectionPropertyMap(generator, binding, Mapper.ToEntityArrayMethodInfo);
-                    }
-                    else if (binding.Alternation.PropertyType == SpecialPropertyType.Collection)
-                    {
-                        BuildCollectionPropertyMap(generator, binding, Mapper.ToEntityCollectionMethodInfo);
-                    }
-                    else
-                    {
-                        BuildPropertyMap(generator, binding);
-                    }
+                    BuildRootBinding(generator, binding);
                 }
                 else
                 {
-                    if (binding.Alternation.PropertyType == SpecialPropertyType.Alternative)
-                    {
-                        BuildAlternativeNestedPropertyMap(generator, binding, isFirstBinding);
-                    }
-                    else if (binding.Alternation.PropertyType == SpecialPropertyType.Array)
-                    {
-                        BuildCollectionNestedPropertyMap(generator, binding, isFirstBinding, Mapper.ToEntityArrayMethodInfo);
-                    }
-                    else if (binding.Alternation.PropertyType == SpecialPropertyType.Collection)
-                    {
-                        BuildCollectionNestedPropertyMap(generator, binding, isFirstBinding, Mapper.ToEntityCollectionMethodInfo);
-                    }
-                    else
-                    {
-                        BuildNestedPropertyMap(generator, binding, isFirstBinding);
-                    }
-
+                    BuildNestedBinding(generator, binding, isFirstBinding);
                     isFirstBinding = false;
                 }
             }
 
-            foreach (var item in _tree)
+            foreach (var child in _tree.Values)
             {
-                var endIf = generator.DefineLabel();
-                var hasTheSameParent = item.Value.CheckHasTheSameParent();
-                if (hasTheSameParent.HasTheSameParent)
-                {
-                    generator.Emit(OpCodes.Nop);
-                    for (var i = 0; i < hasTheSameParent.Parents.Count; ++i)
-                    {
-                        generator.Emit(OpCodes.Ldarg_0);
-                        for (var j = 0; j < i + 1; ++j)
-                        {
-                            var parent = hasTheSameParent.Parents[j];
-                            generator.Emit(OpCodes.Callvirt, parent.Property.GetMethod);
-                        }
-                        generator.Emit(OpCodes.Brfalse, endIf);
-                    }
-                }
+                BuildChild(generator, child);
+            }
+        }
 
-                var memberBinding = generator.DefineLabel();
-                var end = generator.DefineLabel();
-                var targetMember = item.Value._targetMemberTree;
-                generator.Emit(OpCodes.Nop);
-                if (_isRoot)
-                {
-                    generator.Emit(OpCodes.Ldarg_1);
-                }
-                else
-                {
-                    generator.Emit(OpCodes.Dup);
-                }
+        private static void BuildRootBinding(ILGenerator generator, (string Name, MemberTree Target, MemberTree Source, AlternationInfo Alternation) binding)
+        {
+            switch (binding.Alternation.PropertyType)
+            {
+                case SpecialPropertyType.Alternative:
+                    BuildAlternativePropertyMap(generator, binding);
+                    break;
+                case SpecialPropertyType.Array:
+                    BuildCollectionPropertyMap(generator, binding, Mapper.ToEntityArrayMethodInfo);
+                    break;
+                case SpecialPropertyType.Collection:
+                    BuildCollectionPropertyMap(generator, binding, Mapper.ToEntityCollectionMethodInfo);
+                    break;
+                default:
+                    BuildPropertyMap(generator, binding);
+                    break;
+            }
+        }
 
+        private static void BuildNestedBinding(ILGenerator generator, (string Name, MemberTree Target, MemberTree Source, AlternationInfo Alternation) binding, bool isFirstBinding)
+        {
+            switch (binding.Alternation.PropertyType)
+            {
+                case SpecialPropertyType.Alternative:
+                    BuildAlternativeNestedPropertyMap(generator, binding);
+                    break;
+                case SpecialPropertyType.Array:
+                    BuildCollectionNestedPropertyMap(generator, binding, Mapper.ToEntityArrayMethodInfo);
+                    break;
+                case SpecialPropertyType.Collection:
+                    BuildCollectionNestedPropertyMap(generator, binding, Mapper.ToEntityCollectionMethodInfo);
+                    break;
+                default:
+                    BuildNestedPropertyMap(generator, binding, isFirstBinding);
+                    break;
+            }
+        }
+
+        private void BuildChild(ILGenerator generator, InjectToMemberBindingTree child)
+        {
+            var endIf = generator.DefineLabel();
+            var hasTheSameParent = child.CheckHasTheSameParent();
+            hasTheSameParent.BuildParentGuard(generator, OpCodes.Ldarg_0, endIf);
+
+            var memberBinding = generator.DefineLabel();
+            var end = generator.DefineLabel();
+            var targetMember = child._targetMemberTree;
+            generator.Emit(OpCodes.Nop);
+            if (_isRoot)
+            {
+                generator.Emit(OpCodes.Ldarg_1);
+            }
+            else
+            {
                 generator.Emit(OpCodes.Dup);
-
-                if (targetMember.IsProperty)
-                {
-                    generator.Emit(OpCodes.Call, targetMember.Property.GetMethod);
-                }
-                else
-                {
-                    generator.Emit(OpCodes.Ldfld, targetMember.Field);
-                }
-                generator.Emit(OpCodes.Brtrue, memberBinding);
-                generator.Emit(OpCodes.Pop);
-                generator.Emit(OpCodes.Nop);
-                if (_isRoot)
-                {
-                    generator.Emit(OpCodes.Ldarg_1);
-                }
-                else
-                {
-                    generator.Emit(OpCodes.Dup);
-                }
-                generator.Emit(OpCodes.Newobj, item.Value._targetType.GetConstructors()[0]);
-                
-                item.Value.Build(generator);
-
-                generator.Emit(OpCodes.Nop);
-                
-                if (targetMember.IsProperty)
-                {
-                    var setMethod = targetMember.Property.SetMethod;
-                    if (_isRoot)
-                    {
-                        generator.Emit(OpCodes.Call, setMethod);
-                    }
-                    else
-                    {
-                        generator.Emit(OpCodes.Callvirt, setMethod);
-                    }
-                }
-                else
-                {
-                    generator.Emit(OpCodes.Stfld, targetMember.Field);
-                }
-
-                generator.Emit(OpCodes.Br, end);
-                generator.MarkLabel(memberBinding);
-                if (targetMember.IsProperty)
-                {
-                    generator.Emit(OpCodes.Call, targetMember.Property.GetMethod);
-                }
-                else
-                {
-                    generator.Emit(OpCodes.Ldfld, targetMember.Field);
-                }
-                item.Value.Build(generator);
-                generator.Emit(OpCodes.Pop);
-                if (hasTheSameParent.HasTheSameParent)
-                {
-                    generator.MarkLabel(endIf);
-                }
-
-                generator.MarkLabel(end);
             }
+
+            generator.Emit(OpCodes.Dup);
+
+            if (targetMember.IsProperty)
+            {
+                generator.Emit(OpCodes.Call, targetMember.Property.GetMethod);
+            }
+            else
+            {
+                generator.Emit(OpCodes.Ldfld, targetMember.Field);
+            }
+            generator.Emit(OpCodes.Brtrue, memberBinding);
+            generator.Emit(OpCodes.Pop);
+            generator.Emit(OpCodes.Nop);
+            if (_isRoot)
+            {
+                generator.Emit(OpCodes.Ldarg_1);
+            }
+            else
+            {
+                generator.Emit(OpCodes.Dup);
+            }
+            generator.Emit(OpCodes.Newobj, child._targetType.GetRequiredConstructor());
+
+            child.Build(generator);
+
+            generator.Emit(OpCodes.Nop);
+
+            BuildChildSet(generator, targetMember);
+
+            generator.Emit(OpCodes.Br, end);
+            generator.MarkLabel(memberBinding);
+            if (targetMember.IsProperty)
+            {
+                generator.Emit(OpCodes.Call, targetMember.Property.GetMethod);
+            }
+            else
+            {
+                generator.Emit(OpCodes.Ldfld, targetMember.Field);
+            }
+            child.Build(generator);
+            generator.Emit(OpCodes.Pop);
+            if (hasTheSameParent.HasTheSameParent)
+            {
+                generator.MarkLabel(endIf);
+            }
+
+            generator.MarkLabel(end);
         }
 
-        private void BuildCollectionPropertyMap(ILGenerator generator, (string Name, MemberTree Target, MemberTree Source, AlternationInfo Alternation) binding, MethodInfo mapper)
+        private void BuildChildSet(ILGenerator generator, MemberTree target)
+        {
+            if (target.IsProperty)
+                generator.Emit(_isRoot ? OpCodes.Call : OpCodes.Callvirt, target.Property.SetMethod);
+            else
+                generator.Emit(OpCodes.Stfld, target.Field);
+        }
+
+        private static void BuildCollectionPropertyMap(ILGenerator generator, (string Name, MemberTree Target, MemberTree Source, AlternationInfo Alternation) binding, MethodInfo mapper)
         {
             var afterSetPoint = generator.DefineLabel();
             var nothing = generator.DefineLabel();
-            var memberBinding = generator.DefineLabel();
             var targetMember = binding.Target;
             generator.Emit(OpCodes.Nop);
             generator.Emit(OpCodes.Ldarg_0);
@@ -301,7 +290,7 @@ namespace Kkts.Dynamic.Internal
             generator.Emit(OpCodes.Nop);
         }
 
-        private void BuildCollectionNestedPropertyMap(ILGenerator generator, (string Name, MemberTree Target, MemberTree Source, AlternationInfo Alternation) binding, bool isFirstBinding, MethodInfo mapper)
+        private static void BuildCollectionNestedPropertyMap(ILGenerator generator, (string Name, MemberTree Target, MemberTree Source, AlternationInfo Alternation) binding, MethodInfo mapper)
         {
             var afterSetPoint = generator.DefineLabel();
             var nothing = generator.DefineLabel();
@@ -331,7 +320,7 @@ namespace Kkts.Dynamic.Internal
             generator.Emit(OpCodes.Nop);
         }
 
-        private void BuildAlternativePropertyMap(ILGenerator generator, (string Name, MemberTree Target, MemberTree Source, AlternationInfo Alternation) binding)
+        private static void BuildAlternativePropertyMap(ILGenerator generator, (string Name, MemberTree Target, MemberTree Source, AlternationInfo Alternation) binding)
         {
             var afterSetPoint = generator.DefineLabel();
             var nothing = generator.DefineLabel();
@@ -355,7 +344,7 @@ namespace Kkts.Dynamic.Internal
                 generator.Emit(OpCodes.Ldfld, binding.Target.Field);
             }
             generator.Emit(OpCodes.Brtrue, memberBinding);
-            generator.Emit(OpCodes.Newobj, binding.Target.PropertyOrFieldType.GetConstructors()[0]);
+            generator.Emit(OpCodes.Newobj, binding.Target.PropertyOrFieldType.GetRequiredConstructor());
             if (targetMember.IsProperty)
             {
                 var setMethod = targetMember.Property.SetMethod;
@@ -384,7 +373,7 @@ namespace Kkts.Dynamic.Internal
             generator.Emit(OpCodes.Nop);
         }
 
-        private void BuildAlternativeNestedPropertyMap(ILGenerator generator, (string Name, MemberTree Target, MemberTree Source, AlternationInfo Alternation) binding, bool isFirstBinding)
+        private static void BuildAlternativeNestedPropertyMap(ILGenerator generator, (string Name, MemberTree Target, MemberTree Source, AlternationInfo Alternation) binding)
         {
             var afterSetPoint = generator.DefineLabel();
             var nothing = generator.DefineLabel();
@@ -410,7 +399,7 @@ namespace Kkts.Dynamic.Internal
             generator.Emit(OpCodes.Brtrue, memberBinding);
             generator.Emit(OpCodes.Pop);
             generator.Emit(OpCodes.Dup);
-            generator.Emit(OpCodes.Newobj, binding.Target.PropertyOrFieldType.GetConstructors()[0]);
+            generator.Emit(OpCodes.Newobj, binding.Target.PropertyOrFieldType.GetRequiredConstructor());
             if (targetMember.IsProperty)
             {
                 var setMethod = targetMember.Property.SetMethod;
@@ -457,7 +446,7 @@ namespace Kkts.Dynamic.Internal
             generator.Emit(OpCodes.Nop);
         }
 
-        private void BuildPropertyMap(ILGenerator generator, (string Name, MemberTree Target, MemberTree Source, AlternationInfo Alternation) binding)
+        private static void BuildPropertyMap(ILGenerator generator, (string Name, MemberTree Target, MemberTree Source, AlternationInfo Alternation) binding)
         {
             var afterSetPoint = generator.DefineLabel();
             var nothing = generator.DefineLabel();
@@ -478,7 +467,7 @@ namespace Kkts.Dynamic.Internal
             generator.Emit(OpCodes.Nop);
         }
 
-        private void BuildNestedPropertyMap(ILGenerator generator, (string Name, MemberTree Target, MemberTree Source, AlternationInfo Alternation) binding, bool isFirstBinding)
+        private static void BuildNestedPropertyMap(ILGenerator generator, (string Name, MemberTree Target, MemberTree Source, AlternationInfo Alternation) binding, bool isFirstBinding)
         {
             var afterSetPoint = generator.DefineLabel();
             var nothing = generator.DefineLabel();
@@ -509,7 +498,6 @@ namespace Kkts.Dynamic.Internal
             }
 
             _tree.Clear();
-            _cls = null;
             _rootCls = null;
             ((IDisposable)_sourceMemberTree).Dispose();
             ((IDisposable)_targetMemberTree).Dispose();

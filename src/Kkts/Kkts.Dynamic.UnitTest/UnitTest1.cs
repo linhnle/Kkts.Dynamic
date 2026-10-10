@@ -176,6 +176,12 @@ namespace Kkts.Dynamic.UnitTest
             Assert.NotNull(dtoObj);
             var exp = cls1.BuildSelectorExpression();
             Assert.NotNull(exp);
+            dynamic projected = exp.Compile().DynamicInvoke(entity);
+            Assert.Equal(entity.Id, (int)projected.Id);
+            Assert.Equal(entity.Sample.Id, (int)projected.Sample.R.Id);
+            Assert.Equal(entity.Middle.Nested.Id, (int)projected.Middle.Nested.Id);
+            Assert.Equal(entity.Middle.Nested.Array.Length, (int)projected.Middle2.Array.Length);
+            Assert.Equal(entity.Alternation.PublishedDate, (DateTime)projected.PublishedDate);
         }
 
         [Fact]

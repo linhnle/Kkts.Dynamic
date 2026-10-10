@@ -1,15 +1,19 @@
 ﻿using Kkts.Dynamic.Internal;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Linq.Expressions;
 using System.Reflection;
 using System.Reflection.Emit;
+using System.Text;
 
 namespace Kkts.Dynamic
 {
     public sealed class Class : IDisposable
     {
+        [SuppressMessage("SonarAnalyzer.CSharp", "S1104", Justification = "Changing the existing public field to a property would break binary compatibility.")]
+        [SuppressMessage("SonarAnalyzer.CSharp", "S2223", Justification = "Existing consumers configure selector recursion through this mutable public field.")]
         public static uint MaxRecursionDepthToBuildSelectorExpression = 4;
         public const string InjectFromMethodName = "__Inject_From__";
         public const string InjectToMethodName = "__Inject_To__";
@@ -28,6 +32,7 @@ namespace Kkts.Dynamic
         private bool _isBuiltMethods;
         private Type _type;
         private LambdaExpression _selector;
+        private bool _disposed;
 
         internal Class(TypeBuilder typeBuilder, string name, DynamicAssembly assembly, Type mappingType, IEnumerable<PropertyBinding> bindings)
         {
@@ -39,8 +44,8 @@ namespace Kkts.Dynamic
             _isInternal = mappingType == null;
             _mappingTypeMember = new MemberTree(_mappingType);
             _propertyBuilders = new Dictionary<string, PropertyBuilder>(StringComparer.OrdinalIgnoreCase);
-            _subClasses = new Dictionary<string, Class>();
-            _alternativeProperties = new Dictionary<string, Class>();
+            _subClasses = new Dictionary<string, Class>(StringComparer.OrdinalIgnoreCase);
+            _alternativeProperties = new Dictionary<string, Class>(StringComparer.OrdinalIgnoreCase);
             _ctorBuilder = DeclareConstructor();
         }
 
@@ -60,7 +65,80 @@ namespace Kkts.Dynamic
 
         public Type GetBuiltType()
         {
+            EnsureUsable();
             return BuildType();
+        }
+
+        private void EnsureUsable()
+        {
+            if (_disposed) throw new ObjectDisposedException(nameof(Class));
+            _assembly?.EnsureUsable();
+        }
+
+        internal bool Matches(Type mappingType, PropertyBinding[] bindings)
+        {
+            return _mappingType == mappingType && _bindings.Count() == bindings.Length
+                && _bindings.Zip(bindings, (left, right) =>
+                    left.EntityProperty == right.EntityProperty && left.DtoProperty == right.DtoProperty
+                    && left.Mode == right.Mode && left.IsPrimaryKey == right.IsPrimaryKey
+                    && left.PrimaryKeyOrder == right.PrimaryKeyOrder).All(equal => equal);
+        }
+
+        internal void ValidateBindings()
+        {
+            if (_isInternal) return;
+            foreach (var binding in _bindings)
+            {
+                ValidateBinding(binding);
+            }
+        }
+
+        private void ValidateBinding(PropertyBinding binding)
+        {
+            var member = _mappingTypeMember.PropertyOrField(binding.EntityProperty);
+            var writesEntity = binding.Mode != BindingMode.OneWayToDto;
+            ValidateMember(member, writesEntity, binding.Mode != BindingMode.OneWayToEntity);
+            ValidateParents(member, binding.EntityProperty, writesEntity);
+            var alternation = FindAlternativeType(member.PropertyOrFieldType);
+            if (writesEntity && alternation.PropertyType == SpecialPropertyType.Alternative)
+                ValidateMember(member, true, true);
+            if (writesEntity && alternation.PropertyType != SpecialPropertyType.None)
+            {
+                var entityType = alternation.EntityElementType ?? member.PropertyOrFieldType;
+                entityType.GetRequiredConstructor();
+            }
+            if (alternation.PropertyType == SpecialPropertyType.Alternative) return;
+            var child = _bindings.FirstOrDefault(p => p.DtoProperty.StartsWith(binding.DtoProperty + ".", StringComparison.OrdinalIgnoreCase));
+            if (child != null)
+                throw new InvalidOperationException($"DTO path '{binding.DtoProperty}' cannot also be a parent of '{child.DtoProperty}'.");
+        }
+
+        private static void ValidateParents(MemberTree member, string path, bool writesEntity)
+        {
+            for (var parent = member.Parent; !parent.IsRoot; parent = parent.Parent)
+            {
+                if (parent.PropertyOrFieldType.IsValueType)
+                    throw new InvalidOperationException($"Nested value-type path '{path}' is not supported.");
+                ValidateMember(parent, writesEntity, true);
+                if (writesEntity) parent.PropertyOrFieldType.GetRequiredConstructor();
+            }
+        }
+
+        private static void ValidateMember(MemberTree member, bool requiresWrite, bool requiresRead)
+        {
+            if (member.IsProperty)
+            {
+                if (member.Property.GetIndexParameters().Length != 0)
+                    throw new InvalidOperationException($"Indexed property '{member.Name}' is not supported.");
+                if (requiresRead && member.Property.GetGetMethod() == null)
+                    throw new InvalidOperationException($"Property '{member.Name}' must have a public get accessor.");
+                if (requiresWrite && member.Property.GetSetMethod() == null)
+                    throw new InvalidOperationException($"Property '{member.Name}' must have a public set accessor.");
+            }
+            else if (requiresWrite && member.Field.IsInitOnly)
+            {
+                throw new InvalidOperationException($"Field '{member.Name}' is read-only.");
+            }
         }
 
         internal void Clear()
@@ -69,7 +147,7 @@ namespace Kkts.Dynamic
             _subClasses.Clear();
             _alternativeProperties.Clear();
             _propertyBuilders.Clear();
-            
+
         }
 
         internal Type BuildType()
@@ -87,6 +165,7 @@ namespace Kkts.Dynamic
 
         public LambdaExpression BuildSelectorExpression()
         {
+            EnsureUsable();
             if (_type == null) throw new InvalidOperationException($"Should call BuildType before calling {nameof(BuildSelectorExpression)}");
             if (_selector != null) return _selector;
             var param = Expression.Parameter(_mappingType, "p");
@@ -154,6 +233,8 @@ namespace Kkts.Dynamic
                 cls = FindClass(elementType);
                 if (cls != null)
                 {
+                    if (propType.GetArrayRank() != 1 || propType != elementType.MakeArrayType())
+                        throw new InvalidOperationException("Mapped arrays must be single-dimensional, zero-based arrays.");
                     result.PropertyType = SpecialPropertyType.Array;
                     result.Type = cls._typeBuilder;
                     result.Cls = cls;
@@ -166,14 +247,7 @@ namespace Kkts.Dynamic
             if (propType.IsGenericType)
             {
                 var elementType = propType.GetGenericArguments()[0];
-                var enumerableType = typeof(IEnumerable<>).MakeGenericType(elementType);
-                var collectionType = typeof(ICollection<>).MakeGenericType(elementType);
-                var listType = typeof(IList<>).MakeGenericType(elementType);
-                var listType2 = typeof(List<>).MakeGenericType(elementType);
-                if (propType == listType2
-                    || propType == listType
-                    || propType == collectionType
-                    || propType == enumerableType)
+                if (IsSupportedCollection(propType))
                 {
                     cls = FindClass(elementType);
                     if (cls != null)
@@ -205,6 +279,13 @@ namespace Kkts.Dynamic
             return result;
         }
 
+        private static bool IsSupportedCollection(Type type)
+        {
+            var definition = type.GetGenericTypeDefinition();
+            return definition == typeof(List<>) || definition == typeof(IList<>)
+                || definition == typeof(ICollection<>) || definition == typeof(IEnumerable<>);
+        }
+
         private Class FindClass(Type type)
         {
             foreach (var cls in _assembly.Classes)
@@ -225,76 +306,60 @@ namespace Kkts.Dynamic
 
             if (segments.Length == 1)
             {
-                if (!_propertyBuilders.ContainsKey(name))
-                {
-                    var prop = DeclareProperty(name, propType, _typeBuilder, customAttributesData);
-                    _propertyBuilders.Add(name, prop);
-                    if (isAlternativeType)
-                    {
-                        _alternativeProperties.Add(name, alternativeCls);
-                    }
-                }
+                AddProperty(name, propType, customAttributesData, isAlternativeType, alternativeCls);
+                return;
             }
-            else
+
+            DeclareNestedProperty(name, propType, customAttributesData, isAlternativeType, alternativeCls, segments);
+        }
+
+        private void AddProperty(string name, Type propType, IList<CustomAttributeData> attributes, bool isAlternativeType, Class alternativeCls)
+        {
+            var prop = DeclareAutoProperty(name, propType, _typeBuilder, attributes);
+            _propertyBuilders.Add(name, prop);
+            if (isAlternativeType) _alternativeProperties.Add(name, alternativeCls);
+        }
+
+        private void DeclareNestedProperty(string name, Type propType, IList<CustomAttributeData> attributes, bool isAlternativeType, Class alternativeCls, string[] segments)
+        {
+            var propName = string.Empty;
+            var classSuffix = new StringBuilder();
+            var currentCls = this;
+            var ticks = DateTime.Now.Ticks;
+            for (var i = 0; i < segments.Length; ++i)
             {
-                var propName = string.Empty;
-                var classSuffix = string.Empty;
-                TypeBuilder currentType = _typeBuilder;
-                var currentCls = this;
-                var ticks = DateTime.Now.Ticks;
-                for (var i = 0; i < segments.Length; ++i)
+                var segment = segments[i];
+                classSuffix.Append(segment);
+                propName = propName == string.Empty ? segment : $"{propName}.{segment}";
+                if (_subClasses.TryGetValue(propName, out var existing))
                 {
-                    var segment = segments[i];
-                    classSuffix += segment;
-                    propName = propName == string.Empty ? segment : $"{propName}.{segment}";
-                    Class cls;
-                    if (_subClasses.ContainsKey(propName))
-                    {
-                        cls = _subClasses[propName];
-                        currentCls = cls;
-                        currentType = cls._typeBuilder;
-                    }
-                    else
-                    {
-                        if (i == segments.Length - 1)
-                        {
-                            if (currentCls._propertyBuilders.ContainsKey(segment)) break;
-                            var prop = currentCls.DeclareProperty(segment, propType, currentType, customAttributesData);
-                            currentCls._propertyBuilders.Add(segment, prop);
-                            currentCls._propertyBuilders.Add(name, prop);
-                            if (isAlternativeType)
-                            {
-                                currentCls._alternativeProperties.Add(segment, alternativeCls);
-                            }
-                            break;
-                        }
-                        else
-                        {
-                            if (currentCls._alternativeProperties.ContainsKey(segment))
-                            {
-                                cls = currentCls._alternativeProperties[segment];
-                                currentCls._subClasses.Add(segment, cls);
-                                _subClasses.Add(propName, cls);
-                                currentType = cls._typeBuilder;
-                                currentCls = cls;
-                            }
-                            else
-                            {
-                                cls = _assembly.DeclareClass($"{Name}{classSuffix}{ticks}");
-                                _subClasses.Add(propName, cls);
-                                if (i > 0)
-                                {
-                                    currentCls._subClasses.Add(segment, cls);
-                                }
-                                var prop = currentCls.DeclareProperty(segment, cls._typeBuilder, currentType);
-                                currentCls._propertyBuilders.Add(segment, prop);
-                                currentType = cls._typeBuilder;
-                                currentCls = cls;
-                            }
-                        }
-                    }
+                    currentCls = existing;
+                    continue;
                 }
+                if (i == segments.Length - 1)
+                {
+                    if (currentCls._propertyBuilders.ContainsKey(segment)) break;
+                    currentCls.AddProperty(segment, propType, attributes, isAlternativeType, alternativeCls);
+                    currentCls._propertyBuilders.Add(name, currentCls._propertyBuilders[segment]);
+                    break;
+                }
+                currentCls = GetOrDeclareNestedClass(currentCls, segment, propName, $"{Name}{classSuffix}{ticks}", i > 0);
             }
+        }
+
+        private Class GetOrDeclareNestedClass(Class parent, string segment, string path, string className, bool isNested)
+        {
+            if (parent._alternativeProperties.TryGetValue(segment, out var alternative))
+            {
+                parent._subClasses.Add(segment, alternative);
+                _subClasses.Add(path, alternative);
+                return alternative;
+            }
+            var cls = _assembly.DeclareClass(className);
+            _subClasses.Add(path, cls);
+            if (isNested) parent._subClasses.Add(segment, cls);
+            parent.AddProperty(segment, cls._typeBuilder, null, false, null);
+            return cls;
         }
 
         private void DeclareInjectFromMethod(InjectFromMemberBindingTree memberBindings)
@@ -346,9 +411,9 @@ namespace Kkts.Dynamic
             methodIL.Emit(OpCodes.Ret);
         }
 
-        private PropertyBuilder DeclareProperty(string name, Type propType, TypeBuilder typeBuilder, IList<CustomAttributeData> customAttributesData = null)
+        private static PropertyBuilder DeclareAutoProperty(string name, Type propType, TypeBuilder typeBuilder, IList<CustomAttributeData> customAttributesData = null)
         {
-            var fieldBuider = typeBuilder.DefineField($"{name.ToLower()}k__BackingField", propType, FieldAttributes.Private);
+            var fieldBuider = typeBuilder.DefineField($"{name}k__BackingField", propType, FieldAttributes.Private);
             var propertyBuilder = typeBuilder.DefineProperty(name, PropertyAttributes.HasDefault, propType, null);
             var getSetAttr = MethodAttributes.Public
                 | MethodAttributes.SpecialName
@@ -410,7 +475,7 @@ namespace Kkts.Dynamic
                 | MethodAttributes.HideBySig;
             var methodGetBuilder = _typeBuilder.DefineMethod(GetIdsMethodName, attr, typeof(object[]), Type.EmptyTypes);
             var methodIL = methodGetBuilder.GetILGenerator();
-            var resultVariable = methodIL.DeclareLocal(typeof(object[]));
+            methodIL.DeclareLocal(typeof(object[]));
             methodIL.Emit(OpCodes.Nop);
             var ldloc = methodIL.DefineLabel();
             if (noOfKey == 0)
@@ -448,7 +513,7 @@ namespace Kkts.Dynamic
             methodIL.Emit(OpCodes.Ret);
         }
 
-        private bool ShouldBox(Type type)
+        private static bool ShouldBox(Type type)
         {
             type = Nullable.GetUnderlyingType(type) ?? type;
 
@@ -457,6 +522,8 @@ namespace Kkts.Dynamic
 
         void IDisposable.Dispose()
         {
+            if (_disposed) return;
+            _disposed = true;
             Clear();
             if (_bindings != null)
             {

@@ -5,7 +5,7 @@
     <Authors>Linh Le</Authors>
     <Company>KKTS Ltd.</Company>
     <Description>Generate DTO and view-model types at runtime from property bindings. Map between entities and generated DTOs with two-way mapping, nested property paths, collections, primary-key extraction, and LINQ projection expressions. Targets .NET Standard 2.0.</Description>
-    <Copyright>Copyright (C) 2016-2020 KKTS Ltd.</Copyright>
+    <Copyright>Copyright (C) 2016-2026 KKTS Ltd.</Copyright>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/linhnle/Kkts.Dynamic</PackageProjectUrl>
     <RepositoryUrl>https://github.com/linhnle/Kkts.Dynamic.git</RepositoryUrl>

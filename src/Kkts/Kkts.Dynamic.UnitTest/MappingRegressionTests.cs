@@ -127,7 +127,7 @@ namespace Kkts.Dynamic.UnitTest
         {
             var declaration = Declare<AccessorEntity>(Binding(path, "Value", mode));
             using (declaration.Assembly)
-                Assert.Throws<InvalidOperationException>(() => declaration.Assembly.Build());
+                Assert.Throws<MappingValidationException>(() => declaration.Assembly.Build());
         }
 
         [Fact]
@@ -181,7 +181,7 @@ namespace Kkts.Dynamic.UnitTest
             }
             var declaration = Declare<Item>(Binding("Id", "Value"), Binding("Id", "Value.Id", BindingMode.OneWayToDto));
             using (declaration.Assembly)
-                Assert.Throws<InvalidOperationException>(() => declaration.Assembly.Build());
+                Assert.Throws<MappingValidationException>(() => declaration.Assembly.Build());
         }
 
         [Fact]
@@ -201,7 +201,7 @@ namespace Kkts.Dynamic.UnitTest
             var declaration = Declare<Item>(Binding("Missing"));
             using (declaration.Assembly)
             {
-                var original = Assert.Throws<InvalidOperationException>(() => declaration.Assembly.Build());
+                var original = Assert.Throws<MappingValidationException>(() => declaration.Assembly.Build());
                 var retry = Assert.Throws<InvalidOperationException>(() => declaration.Assembly.Build());
                 Assert.Same(original, retry.InnerException);
                 Assert.Throws<InvalidOperationException>(() => declaration.Class.GetBuiltType());
@@ -234,7 +234,7 @@ namespace Kkts.Dynamic.UnitTest
             var declaration = Declare<ConstructorParent>(Binding("Child.Id", "ChildId"));
             using (declaration.Assembly)
             {
-                var error = Assert.Throws<InvalidOperationException>(() => declaration.Assembly.Build());
+                var error = Assert.Throws<MappingValidationException>(() => declaration.Assembly.Build());
                 Assert.Contains("parameterless constructor", error.Message);
             }
         }
@@ -248,7 +248,7 @@ namespace Kkts.Dynamic.UnitTest
             {
                 assembly.DeclareClass("Parent", typeof(ConstructorCollectionParent), new[] { Binding(path) });
                 assembly.DeclareClass("Child", typeof(Parameterized), new[] { Binding("Id") });
-                Assert.Throws<InvalidOperationException>(() => assembly.Build());
+                Assert.Throws<MappingValidationException>(() => assembly.Build());
             }
         }
 

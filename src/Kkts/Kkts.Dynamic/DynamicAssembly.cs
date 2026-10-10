@@ -1,4 +1,5 @@
-﻿using System;
+﻿using Kkts.Dynamic.Internal;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
@@ -11,6 +12,7 @@ namespace Kkts.Dynamic
     {
         private readonly ModuleBuilder _moduleBuilder;
         private readonly Dictionary<string, Class> _classMap;
+        private readonly List<Class> _derivedClasses = new List<Class>();
         private BuildState _state;
         private Exception _buildError;
 
@@ -37,6 +39,16 @@ namespace Kkts.Dynamic
                 EnsureUsable();
                 return _classMap.Values.ToArray();
             }
+        }
+
+        public Class DeclareClass<TEntity>(string name, Action<BindingBuilder<TEntity>> configure) where TEntity : class
+        {
+            EnsureUsable();
+            if (_state != BuildState.Declaring) throw new InvalidOperationException("Classes can only be declared before building the assembly.");
+            if (configure == null) throw new ArgumentNullException(nameof(configure));
+            var builder = new BindingBuilder<TEntity>();
+            configure(builder);
+            return DeclareClass(name, typeof(TEntity), builder.Bindings);
         }
 
         public Class DeclareClass(string name, Type mappingType, IEnumerable<PropertyBinding> bindings)
@@ -86,11 +98,16 @@ namespace Kkts.Dynamic
             _state = BuildState.Building;
             try
             {
-                foreach (var cls in _classMap.Values.ToArray()) cls.ValidateBindings();
-                foreach (var cls in _classMap.Values.ToArray()) cls.BuildProperties();
-                foreach (var cls in _classMap.Values.ToArray()) cls.BuildMethods();
-                foreach (var cls in _classMap.Values.ToArray()) cls.BuildType();
-                foreach (var cls in _classMap.Values) cls.Clear();
+                var report = Validate();
+                if (!report.IsValid) throw new MappingValidationException(report);
+                foreach (var cls in _classMap.Values.ToArray()) cls.ResolveBindings();
+                for (var i = 0; i < _derivedClasses.Count; i++) _derivedClasses[i].ResolveBindings();
+                foreach (var cls in AllClasses().ToArray()) cls.BuildProperties();
+                foreach (var cls in AllClasses().ToArray()) cls.BuildMethods();
+                foreach (var cls in AllClasses().ToArray()) cls.BuildType();
+                foreach (var cls in AllClasses()) cls.InitializeTransformations();
+                foreach (var cls in AllClasses()) cls.RegisterPartialUpdates();
+                foreach (var cls in AllClasses()) cls.Clear();
                 _state = BuildState.Built;
             }
             catch (Exception error)
@@ -111,48 +128,112 @@ namespace Kkts.Dynamic
 
         private static PropertyBinding[] NormalizeBindings(IEnumerable<PropertyBinding> bindings)
         {
-            var result = new List<PropertyBinding>();
-            var dtoPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var entityWritePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var binding in bindings)
-            {
-                if (binding == null) throw new ArgumentException("Bindings cannot contain null entries.", nameof(bindings));
-                var dtoProperty = binding.DtoProperty ?? binding.EntityProperty;
-                ValidatePath(binding.EntityProperty, nameof(binding.EntityProperty));
-                ValidatePath(dtoProperty, nameof(binding.DtoProperty));
-                if (!Enum.IsDefined(typeof(BindingMode), binding.Mode))
-                    throw new ArgumentException($"Invalid binding mode: {binding.Mode}.", nameof(bindings));
-                if (!dtoPaths.Add(dtoProperty))
-                    throw new ArgumentException($"Duplicate DTO path '{dtoProperty}'.", nameof(bindings));
-                if (binding.Mode != BindingMode.OneWayToDto && !entityWritePaths.Add(binding.EntityProperty))
-                    throw new ArgumentException($"Multiple bindings write entity path '{binding.EntityProperty}'.", nameof(bindings));
-                if (binding.IsPrimaryKey && (binding.EntityProperty.IndexOf('.') >= 0 || dtoProperty.IndexOf('.') >= 0))
-                    throw new ArgumentException("Primary keys must use top-level entity and DTO properties.", nameof(bindings));
-                result.Add(new PropertyBinding
-                {
-                    DtoProperty = dtoProperty, EntityProperty = binding.EntityProperty,
-                    IsPrimaryKey = binding.IsPrimaryKey, Mode = binding.Mode,
-                    PrimaryKeyOrder = binding.PrimaryKeyOrder
-                });
-            }
+            var result = BindingValidation.Snapshot(bindings);
+            var error = BindingValidation.Syntax(null, result).FirstOrDefault();
+            if (error != null) throw new ArgumentException(error.Message, nameof(bindings));
             return result.OrderBy(p => p.DtoProperty, StringComparer.OrdinalIgnoreCase).ToArray();
         }
 
-        private static void ValidatePath(string path, string name)
+        public MappingValidationReport Validate()
         {
-            if (string.IsNullOrWhiteSpace(path) || path.Split('.').Any(string.IsNullOrWhiteSpace))
-                throw new ArgumentException("Property paths must contain non-empty segments.", name);
+            EnsureUsable();
+            var diagnostics = new List<MappingDiagnostic>();
+            foreach (var cls in _classMap.Values) cls.ValidateBindings(diagnostics, ResolveAlternative);
+            return new MappingValidationReport(diagnostics);
         }
+
+        public MappingValidationReport ValidateClass(string name, Type mappingType, IEnumerable<PropertyBinding> bindings)
+        {
+            EnsureUsable();
+            var diagnostics = new List<MappingDiagnostic>();
+            var snapshot = bindings == null ? null : BindingValidation.Snapshot(bindings);
+            if (string.IsNullOrWhiteSpace(name))
+                diagnostics.Add(new MappingDiagnostic("ClassName", name, null, "Configuration", "A class name is required.", "Provide a non-empty class name."));
+            if (mappingType == null || !mappingType.IsClass || !mappingType.IsVisible || mappingType.ContainsGenericParameters)
+                diagnostics.Add(new MappingDiagnostic("EntityType", name, null, "Configuration", "The mapping type must be a visible, closed reference class.", "Choose a public, closed entity class."));
+            if (snapshot == null)
+                diagnostics.Add(new MappingDiagnostic("Bindings", name, null, "Configuration", "Bindings are required.", "Provide a binding sequence."));
+            else
+            {
+                diagnostics.AddRange(BindingValidation.Syntax(name, snapshot));
+                if (name != null && _classMap.TryGetValue(name, out var existing)
+                    && (snapshot.Any(b => b == null) || !existing.Matches(mappingType, snapshot.OrderBy(b => b.DtoProperty, StringComparer.OrdinalIgnoreCase).ToArray())))
+                    diagnostics.Add(new MappingDiagnostic("ClassConflict", name, null, "Configuration", "The name is already declared with different mappings.", "Use a different class name or equivalent bindings."));
+                if (mappingType != null && mappingType.IsClass && mappingType.IsVisible && !mappingType.ContainsGenericParameters)
+                    BindingValidation.Members(name, mappingType, snapshot,
+                        (type, binding) => ResolveCandidateAlternative(type, binding, name, mappingType), diagnostics);
+            }
+            foreach (var cls in _classMap.Values) cls.ValidateBindings(diagnostics, ResolveAlternative);
+            return new MappingValidationReport(diagnostics);
+        }
+
+        internal AlternationInfo ResolveAlternative(Type type, PropertyBinding binding)
+        {
+            if (binding.IsTransformed) return new AlternationInfo { Type = binding.DtoValueType ?? type };
+            return Class.ResolveAlternative(type, candidate =>
+            {
+                if (binding.NestedShape != null)
+                {
+                    if (!_classMap.TryGetValue(binding.NestedShape, out var selected))
+                        throw new InvalidOperationException($"Nested shape '{binding.NestedShape}' does not exist.");
+                    if (selected.MappingType != candidate)
+                        throw new InvalidOperationException($"Nested shape '{binding.NestedShape}' does not map '{candidate.FullName}'.");
+                    return selected;
+                }
+
+                var matches = _classMap.Values.Where(c => c.MappingType == candidate).ToArray();
+                if (matches.Length > 1)
+                    throw new InvalidOperationException($"Nested type '{candidate.FullName}' has multiple shapes ({string.Join(", ", matches.Select(c => c.Name))}). Specify NestedShape.");
+                return matches.SingleOrDefault();
+            });
+        }
+
+        private AlternationInfo ResolveCandidateAlternative(Type type, PropertyBinding binding, string name, Type mappingType)
+        {
+            if (binding.IsTransformed) return new AlternationInfo { Type = binding.DtoValueType ?? type };
+            var elementType = type.IsArray ? type.GetElementType()
+                : Class.IsSupportedCollection(type) ? type.GetGenericArguments()[0] : type;
+            var matchesCandidate = elementType == mappingType;
+            var alreadyDeclared = name != null && _classMap.ContainsKey(name);
+            if (binding.NestedShape != null && binding.NestedShape != name)
+                return ResolveAlternative(type, binding);
+            if (binding.NestedShape == name && name != null && !matchesCandidate)
+                throw new InvalidOperationException($"Nested shape '{name}' does not map '{elementType.FullName}'.");
+            if (!matchesCandidate || alreadyDeclared) return ResolveAlternative(type, binding);
+            if (binding.NestedShape == null && _classMap.Values.Any(c => c.MappingType == elementType))
+                throw new InvalidOperationException($"Nested type '{elementType.FullName}' has multiple shapes including candidate '{name}'. Specify NestedShape.");
+            if (type.IsArray && (type.GetArrayRank() != 1 || type != elementType.MakeArrayType()))
+                throw new InvalidOperationException("Mapped arrays must be single-dimensional, zero-based arrays.");
+            return new AlternationInfo
+            {
+                Type = type,
+                EntityElementType = elementType,
+                PropertyType = type.IsArray ? SpecialPropertyType.Array
+                    : Class.IsSupportedCollection(type) ? SpecialPropertyType.Collection : SpecialPropertyType.Alternative
+            };
+        }
+
+        internal Class DeriveShape(Class baseShape, string[] overlayPaths)
+        {
+            var name = $"__{baseShape.Name}_{Guid.NewGuid():N}";
+            var builder = _moduleBuilder.DefineType(name, TypeAttributes.Public, null, new[] { typeof(IDtoObject) });
+            var derived = new Class(builder, name, this, baseShape.MappingType, BindingValidation.Snapshot(baseShape.Bindings), overlayPaths);
+            _derivedClasses.Add(derived);
+            return derived;
+        }
+
+        private IEnumerable<Class> AllClasses() => _classMap.Values.Concat(_derivedClasses);
 
         void IDisposable.Dispose()
         {
             if (_state == BuildState.Disposed) return;
-            foreach (IDisposable cls in _classMap.Values)
+            foreach (IDisposable cls in AllClasses())
             {
                 cls.Dispose();
             }
 
             _classMap.Clear();
+            _derivedClasses.Clear();
             _state = BuildState.Disposed;
         }
     }

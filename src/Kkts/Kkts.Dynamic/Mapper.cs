@@ -21,6 +21,23 @@ namespace Kkts.Dynamic
         // Weak keys allow generated types and their delegates to be collected together.
         private static readonly ConditionalWeakTable<Type, Lazy<MappingMethods>> Mappings = new ConditionalWeakTable<Type, Lazy<MappingMethods>>();
         private static readonly ConditionalWeakTable<Type, Lazy<Func<object>>> Factories = new ConditionalWeakTable<Type, Lazy<Func<object>>>();
+        private static readonly ConditionalWeakTable<Type, PartialUpdatePlan> PartialUpdates = new ConditionalWeakTable<Type, PartialUpdatePlan>();
+
+        public static void MapPartialFromDtoToEntity(object dto, object entity, IEnumerable<string> suppliedDtoPaths)
+        {
+            if (dto == null) throw new ArgumentNullException(nameof(dto));
+            if (entity == null) throw new ArgumentNullException(nameof(entity));
+            if (suppliedDtoPaths == null) throw new ArgumentNullException(nameof(suppliedDtoPaths));
+            GetMapping(dto.GetType()).ValidateEntity(entity);
+            if (!PartialUpdates.TryGetValue(dto.GetType(), out var plan))
+                throw new ArgumentException("The DTO type has no generated partial-update metadata.", nameof(dto));
+            plan.Apply(dto, entity, suppliedDtoPaths);
+        }
+
+        internal static void RegisterPartialUpdates(Class shape)
+        {
+            PartialUpdates.Add(shape.GetBuiltType(), new PartialUpdatePlan(shape));
+        }
 
         public static void MapFromDtoToEntity(object dto, object entity)
         {
@@ -38,6 +55,16 @@ namespace Kkts.Dynamic
             var mapping = GetMapping(dto.GetType());
             mapping.ValidateEntity(entity);
             mapping.ToDto(dto, entity);
+        }
+
+        internal static object CreateMappedDto(Type dtoType, object entity)
+        {
+            if (entity == null) throw new ArgumentNullException(nameof(entity));
+            var mapping = GetMapping(dtoType);
+            mapping.ValidateEntity(entity);
+            var dto = GetFactory(dtoType)();
+            mapping.ToDto(dto, entity);
+            return dto;
         }
 
         [Browsable(false)]

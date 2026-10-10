@@ -84,10 +84,7 @@ assembly.Build();
 
 var dtoType = productDtoClass.GetBuiltType();
 var product = new Product { Id = 1, ProductName = "Phone", Price = 20.5 };
-var dto = Activator.CreateInstance(dtoType);
-
-// Both mapping methods take the DTO first, then the entity.
-Mapper.MapFromEntityToDto(dto, product);
+var dto = productDtoClass.CreateDto(product);
 
 Console.WriteLine(dtoType.GetProperty("Name").GetValue(dto)); // Phone
 Console.WriteLine(DtoObject.GetIds(dto)[0]); // 1
@@ -100,6 +97,26 @@ Console.WriteLine(product.Id); // 1: the Id binding does not write back
 ```
 
 Declare all classes before calling `Build()`. Reuse built types for subsequent mappings rather than generating a new assembly for every object.
+
+`Class.CreateDto(entity)` creates a fresh object of the selected generated type and maps its forward bindings. It requires a built, usable declaration and a non-null compatible entity; it never builds implicitly. Existing DTO-first mapper calls remain available, including explicit activation followed by `Mapper.MapFromEntityToDto(dto, entity)`, and retain their null-argument no-op behavior.
+
+### Typed fluent bindings
+
+Use expressions for compiler-checked entity paths, while retaining strings for runtime-defined DTO paths:
+
+```csharp
+var productDtoClass = assembly.DeclareClass<Product>("ProductDto", bindings => bindings
+    .Map(p => p.Id, mode: BindingMode.OneWayToDto, isPrimaryKey: true)
+    .Map(p => p.ProductName, "Name")
+    .Map(p => p.Price));
+
+assembly.Build();
+var dto = productDtoClass.CreateDto(product);
+```
+
+This is an alternative declaration to the quick start, not an additional declaration after `Build()`. Omitting the DTO path uses the complete entity path. Specify `primaryKeyOrder` for composite identifiers. `.Map(new PropertyBinding { ... })` can include configuration-driven bindings in the same fluent declaration.
+
+Member expressions support instance property/field chains rooted at the entity parameter, including nested paths and terminal boxing without changing the member type. Calculations, calls, indexers, static/captured members, and meaning-changing casts are rejected. Direction-specific accessor rules and the nested value-type restriction are the same as string bindings. Computed values belong in a separate computed-value binding, not `.Map`. Declarations snapshot configuration; later builder or binding mutations cannot change them.
 
 ## Property bindings
 
@@ -220,6 +237,85 @@ Here, `product` and `dtoType` come from the quick start. Array helpers require s
 - Entity property attributes are copied for bindings that can write back to the entity.
 - Null DTO/entity arguments are no-ops. Null intermediate objects skip their bindings, preserving existing destination values. Null directly mapped scalar/collection properties are assigned; null mapped alternative objects preserve existing objects. Arrays and mapped collections preserve null elements.
 - Property assignments use emitted IL. Mapping dispatch and object factories use cached delegates with weak type keys so collectible assemblies can unload. Build and first-call costs still apply; measure performance for your workload.
+
+## Named DTO shapes and nested overlays
+
+Declare several names for an entity, then select nested object/collection shapes explicitly:
+
+```csharp
+assembly.DeclareClass<Category>("CategorySummary", b => b.Map(c => c.Id));
+assembly.DeclareClass<Category>("CategoryDetail", b => b.Map(c => c.Id).Map(c => c.Name));
+assembly.DeclareClass<CatalogProduct>("CatalogSummary", b => b
+    .Map(p => p.Category, nestedShape: "CategorySummary")
+    .Map(p => p.ExternalCode));
+```
+
+String bindings use `NestedShape` for the same selection. A selected shape must belong to this assembly and map the exact entity or collection-element type; declarations can reference a shape declared later. Zero matching shapes retain direct assignment, and one retains automatic substitution. **Migration:** multiple matching nested shapes now fail validation instead of choosing the first registration. Set `NestedShape` explicitly for ambiguous bindings.
+
+Additional paths beneath a mapped object (for example, `Child.Id` to `Child.ExtraId`) extend an isolated per-use DTO layout. They do not add properties to the registered base DTO or another parent's nested shape. Overlay source paths remain relative to the parent entity and can refer to other parent members. Incompatible base/overlay leaves and duplicate reverse writes are configuration errors. Without overlays, the nested DTO keeps the selected base type.
+
+## Mapping validation
+
+Inspect all independently detectable configuration errors before building:
+
+```csharp
+var report = assembly.Validate();
+foreach (var diagnostic in report.Diagnostics)
+    Console.WriteLine($"{diagnostic.Code}: {diagnostic.ClassName} [{diagnostic.DtoPath}] " +
+        $"{diagnostic.Direction}: {diagnostic.Message} {diagnostic.SuggestedFix}");
+```
+
+`ValidateClass(name, entityType, bindings)` checks a raw candidate alongside registered declarations without registering it. This is useful for configuration-driven input whose syntax would otherwise fail immediately at declaration. Reports expose `IsValid` and immutable diagnostics with severity, original zero-based binding index, entity/DTO paths, direction or configuration scope, stable code, explanation, and corrective guidance.
+
+Validation does not build types, mutate caller configuration, or fault the assembly. Existing declaration-time argument failures remain fail-fast. `Build()` runs the same checks and throws `MappingValidationException` (an `InvalidOperationException`) with a `Report` if invalid; that failed build still permanently faults the assembly. Create a new assembly before retrying corrected declarations.
+
+## Conversions and computed values
+
+Declare converted member types and forward-only computations explicitly:
+
+```csharp
+var display = assembly.DeclareClass<Product>("ProductDisplay", b => b
+    .MapConverted<int, string>(p => p.Id, "Id",
+        value => value.ToString(), value => int.Parse(value),
+        BindingMode.TwoWay, isPrimaryKey: true)
+    .Compute("Label", p => p.ProductName + " (" + p.Price + ")"));
+```
+
+`MapConverted` defaults to forward-only; two-way type conversions require explicit forward and reverse expressions with exactly matching input/output types. `Compute` infers the DTO value type and is forward-only, cannot be a primary key, and owns its null navigation. Converted top-level keys return the DTO-side value from `GetIds`.
+
+`MapConvertedInMemory` and `ComputeInMemory` accept delegates for deliberate in-memory transformations. String configuration uses `DtoValueType`, `ToDtoExpression` / `ToEntityExpression`, `ToDtoInMemory` / `ToEntityInMemory`, and `ComputedExpression` / `ComputedInMemory`. Choose one representation per direction. A forward expression can be combined with a reverse-only delegate.
+
+Expression bodies are composed into selectors without compiled delegate invocation. Active delegate-only forward bindings, including in nested shapes, produce validation warnings and cause selector construction to fail explicitly with the shape and DTO path. They do not prevent in-memory build/mapping. Reverse-only delegates do not block forward selectors. Database translation remains the query provider's responsibility; no client-evaluation fallback is introduced.
+
+Member conversions retain intermediate-null guards and receive directly mapped nulls when their input type allows them. Computations do not receive automatic null-navigation rewrites. Converter/getter/setter exceptions propagate directly. Same-type member bindings retain existing copied attributes; changed-type converted and computed DTO properties do not inherit potentially incompatible entity attributes. Transformation bindings do not also perform registered nested-shape substitution.
+
+## Explicit partial updates
+
+Use caller-supplied DTO paths to distinguish omitted fields from supplied nulls:
+
+```csharp
+var edit = assembly.DeclareClass<Product>("ProductEdit", b => b
+    .Map(p => p.ProductName, "Name")
+    .Map(p => p.Price));
+assembly.Build();
+var dto = edit.CreateDto(product);
+
+dto.GetType().GetProperty("Name").SetValue(dto, "Updated");
+Mapper.MapPartialFromDtoToEntity(dto, product, new[] { "Name" });
+// Name is updated; Price is omitted and preserved.
+
+dto.GetType().GetProperty("Name").SetValue(dto, null);
+Mapper.MapPartialFromDtoToEntity(dto, product, new[] { "Name" });
+// The supplied null clears ProductName.
+```
+
+This is a separate declaration example, not an addition after an earlier build. Capture presence from the request/configuration layer; a DTO's default values alone cannot indicate whether a field was supplied. The path sequence is enumerated once, matched case-insensitively, and deduplicated. An empty sequence does nothing; null arguments and incompatible DTO/entity types fail explicitly.
+
+Select editable leaves such as `Fields.Name` or whole mapped objects/collections such as `Category` or `Tags`. Synthetic grouping objects cannot be selected as a whole. Unknown, forward-only/computed, indexed/element, and overlapping whole-object/descendant paths are rejected before reads or writes. Explicitly selected descendants beneath a null DTO parent fail rather than silently clearing or skipping.
+
+Omitted fields do not execute getters/converters or construct entity parents. Selected scalar descendants create only required entity parents and preserve siblings. Supplied nulls clear reference/nullable targets, including mapped alternative objects; explicit reverse conversions can instead turn null into a valid value. Non-null whole mapped objects use their selected shape's full reverse mapping and applicable parent overlays once, retaining its null-navigation guards. Overlay leaves are editable only in the declaring parent's effective layout, and forward-only overlays remain excluded. Arrays/collections are replaced wholesale, cleared by null, or preserved when omitted; null elements remain intact. Element-level updates, merge-by-key, and delete-by-key are not supported.
+
+All presence checks and selected value/conversion preparation finish before assignments. Arbitrary user getter, converter, constructor, or setter exceptions propagate directly, without a transactional rollback guarantee (including full mapping of selected objects). Existing `MapFromDtoToEntity` behavior is unchanged: notably, null mapped alternative objects still preserve existing entities. Built partial-update plans remain usable after builder disposal and use weak type ownership, not caches of arbitrary presence combinations.
 
 ## Selector expressions
 

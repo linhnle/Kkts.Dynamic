@@ -36,7 +36,11 @@ namespace Kkts.Dynamic.Internal
             foreach (var binding in bindings)
             {
                 if (binding.Mode == BindingMode.OneWayToEntity) continue;
-                var source = _sourceMemberTree.Property(binding.EntityProperty);
+                var source = binding.IsComputed ? null : _sourceMemberTree.Property(binding.EntityProperty);
+                var guard = source?.Guard ?? _sourceMemberTree.Guard;
+                var value = binding.IsTransformed
+                    ? BindingExpressions.Transform(binding, source?.MemberExpression ?? _sourceMemberTree.Value, true, true)
+                    : source.MemberExpression;
                 var segments = binding.DtoProperty.Split('.');
                 var current = this;
                 for (var i = 0; i < segments.Length - 1; ++i)
@@ -49,19 +53,18 @@ namespace Kkts.Dynamic.Internal
                         current._tree.Add(segment, (member, child));
                         entry = (member, child);
                     }
-                    current._guards.Add(source.Guard);
+                    current._guards.Add(guard);
                     current = entry.Tree;
                 }
 
-                current.BindMember(segments[segments.Length - 1], source, binding.Alternation);
+                current.BindMember(segments[segments.Length - 1], source, binding.Alternation, value, guard);
             }
         }
 
-        private void BindMember(string name, SelectSourceMemberExpressionTree source, AlternationInfo alternation)
+        private void BindMember(string name, SelectSourceMemberExpressionTree source, AlternationInfo alternation, Expression value, Expression sourceGuard)
         {
             var member = GetMember(name);
-            var value = source.MemberExpression;
-            _guards.Add(source.Guard);
+            _guards.Add(sourceGuard);
             if (alternation.PropertyType == SpecialPropertyType.Alternative)
             {
                 CheckDepth();
@@ -78,7 +81,7 @@ namespace Kkts.Dynamic.Internal
             }
 
             Expression mappedValue = value;
-            Expression guard = source.Guard;
+            Expression guard = sourceGuard;
             if (alternation.PropertyType == SpecialPropertyType.Array || alternation.PropertyType == SpecialPropertyType.Collection)
             {
                 CheckDepth();

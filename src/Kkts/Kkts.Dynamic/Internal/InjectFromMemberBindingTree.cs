@@ -201,7 +201,22 @@ namespace Kkts.Dynamic.Internal
                 generator.Emit(OpCodes.Dup);
             }
 
-            generator.Emit(OpCodes.Newobj, child._cls.Constructor);
+            if (child._parent.HasAlternativeProperty(name))
+            {
+                var present = generator.DefineLabel();
+                generator.Emit(OpCodes.Dup);
+                generator.Emit(OpCodes.Callvirt, child._parent.PropertyBuilders[name].GetMethod);
+                generator.Emit(OpCodes.Dup);
+                generator.Emit(OpCodes.Brtrue, present);
+                generator.Emit(OpCodes.Pop);
+                generator.Emit(OpCodes.Pop);
+                generator.Emit(OpCodes.Br, endIf);
+                generator.MarkLabel(present);
+            }
+            else
+            {
+                generator.Emit(OpCodes.Newobj, child._cls.Constructor);
+            }
 
             child.Build(generator);
 
@@ -216,10 +231,7 @@ namespace Kkts.Dynamic.Internal
                 generator.Emit(OpCodes.Callvirt, setMethod);
             }
 
-            if (hasTheSameParent.HasTheSameParent)
-            {
-                generator.MarkLabel(endIf);
-            }
+            generator.MarkLabel(endIf);
         }
 
         private static void BuildCollectionPropertyMap(ILGenerator generator, (string Name, PropertyInfo PI, MemberTree Source, AlternationInfo Alternation) binding, MethodInfo mapper)

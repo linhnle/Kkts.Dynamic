@@ -33,14 +33,18 @@ namespace Kkts.Dynamic
         private Type _type;
         private LambdaExpression _selector;
         private bool _disposed;
+        private readonly string[] _overlayPaths;
+        private FieldBuilder _forwardTransformations;
+        private FieldBuilder _reverseTransformations;
 
-        internal Class(TypeBuilder typeBuilder, string name, DynamicAssembly assembly, Type mappingType, IEnumerable<PropertyBinding> bindings)
+        internal Class(TypeBuilder typeBuilder, string name, DynamicAssembly assembly, Type mappingType, IEnumerable<PropertyBinding> bindings, string[] overlayPaths = null)
         {
             _typeBuilder = typeBuilder;
             Name = name;
             _assembly = assembly;
             _mappingType = mappingType;
             _bindings = bindings;
+            _overlayPaths = overlayPaths ?? Array.Empty<string>();
             _isInternal = mappingType == null;
             _mappingTypeMember = new MemberTree(_mappingType);
             _propertyBuilders = new Dictionary<string, PropertyBuilder>(StringComparer.OrdinalIgnoreCase);
@@ -62,11 +66,23 @@ namespace Kkts.Dynamic
         internal TypeBuilder TypeBuilder => _typeBuilder;
 
         internal IEnumerable<PropertyBinding> Bindings => _bindings;
+        internal Type MappingType => _mappingType;
+        internal void RegisterPartialUpdates()
+        {
+            if (!_isInternal) Mapper.RegisterPartialUpdates(this);
+        }
+        internal bool HasAlternativeProperty(string name) => _alternativeProperties.ContainsKey(name);
 
         public Type GetBuiltType()
         {
             EnsureUsable();
             return BuildType();
+        }
+
+        public object CreateDto(object entity)
+        {
+            EnsureUsable();
+            return Mapper.CreateMappedDto(GetBuiltType(), entity);
         }
 
         private void EnsureUsable()
@@ -81,64 +97,18 @@ namespace Kkts.Dynamic
                 && _bindings.Zip(bindings, (left, right) =>
                     left.EntityProperty == right.EntityProperty && left.DtoProperty == right.DtoProperty
                     && left.Mode == right.Mode && left.IsPrimaryKey == right.IsPrimaryKey
-                    && left.PrimaryKeyOrder == right.PrimaryKeyOrder).All(equal => equal);
+                    && left.PrimaryKeyOrder == right.PrimaryKeyOrder
+                    && left.NestedShape == right.NestedShape
+                    && left.DtoValueType == right.DtoValueType
+                    && left.ToDtoExpression == right.ToDtoExpression && left.ToEntityExpression == right.ToEntityExpression
+                    && ReferenceEquals(left.ToDtoInMemory, right.ToDtoInMemory) && ReferenceEquals(left.ToEntityInMemory, right.ToEntityInMemory)
+                    && left.ComputedExpression == right.ComputedExpression && ReferenceEquals(left.ComputedInMemory, right.ComputedInMemory)).All(equal => equal);
         }
 
-        internal void ValidateBindings()
+        internal void ValidateBindings(List<MappingDiagnostic> diagnostics, Func<Type, PropertyBinding, AlternationInfo> resolveAlternative)
         {
             if (_isInternal) return;
-            foreach (var binding in _bindings)
-            {
-                ValidateBinding(binding);
-            }
-        }
-
-        private void ValidateBinding(PropertyBinding binding)
-        {
-            var member = _mappingTypeMember.PropertyOrField(binding.EntityProperty);
-            var writesEntity = binding.Mode != BindingMode.OneWayToDto;
-            ValidateMember(member, writesEntity, binding.Mode != BindingMode.OneWayToEntity);
-            ValidateParents(member, binding.EntityProperty, writesEntity);
-            var alternation = FindAlternativeType(member.PropertyOrFieldType);
-            if (writesEntity && alternation.PropertyType == SpecialPropertyType.Alternative)
-                ValidateMember(member, true, true);
-            if (writesEntity && alternation.PropertyType != SpecialPropertyType.None)
-            {
-                var entityType = alternation.EntityElementType ?? member.PropertyOrFieldType;
-                entityType.GetRequiredConstructor();
-            }
-            if (alternation.PropertyType == SpecialPropertyType.Alternative) return;
-            var child = _bindings.FirstOrDefault(p => p.DtoProperty.StartsWith(binding.DtoProperty + ".", StringComparison.OrdinalIgnoreCase));
-            if (child != null)
-                throw new InvalidOperationException($"DTO path '{binding.DtoProperty}' cannot also be a parent of '{child.DtoProperty}'.");
-        }
-
-        private static void ValidateParents(MemberTree member, string path, bool writesEntity)
-        {
-            for (var parent = member.Parent; !parent.IsRoot; parent = parent.Parent)
-            {
-                if (parent.PropertyOrFieldType.IsValueType)
-                    throw new InvalidOperationException($"Nested value-type path '{path}' is not supported.");
-                ValidateMember(parent, writesEntity, true);
-                if (writesEntity) parent.PropertyOrFieldType.GetRequiredConstructor();
-            }
-        }
-
-        private static void ValidateMember(MemberTree member, bool requiresWrite, bool requiresRead)
-        {
-            if (member.IsProperty)
-            {
-                if (member.Property.GetIndexParameters().Length != 0)
-                    throw new InvalidOperationException($"Indexed property '{member.Name}' is not supported.");
-                if (requiresRead && member.Property.GetGetMethod() == null)
-                    throw new InvalidOperationException($"Property '{member.Name}' must have a public get accessor.");
-                if (requiresWrite && member.Property.GetSetMethod() == null)
-                    throw new InvalidOperationException($"Property '{member.Name}' must have a public set accessor.");
-            }
-            else if (requiresWrite && member.Field.IsInitOnly)
-            {
-                throw new InvalidOperationException($"Field '{member.Name}' is read-only.");
-            }
+            BindingValidation.Members(Name, _mappingType, _bindings.ToArray(), resolveAlternative, diagnostics);
         }
 
         internal void Clear()
@@ -168,6 +138,7 @@ namespace Kkts.Dynamic
             EnsureUsable();
             if (_type == null) throw new InvalidOperationException($"Should call BuildType before calling {nameof(BuildSelectorExpression)}");
             if (_selector != null) return _selector;
+            ValidateProjection(new HashSet<Class>(), "");
             var param = Expression.Parameter(_mappingType, "p");
             using (var bindingTree = new SelectMemberBindingExpressionTree(param, _type))
             {
@@ -179,15 +150,32 @@ namespace Kkts.Dynamic
             }
         }
 
+        private void ValidateProjection(HashSet<Class> visited, string prefix)
+        {
+            if (!visited.Add(this)) return;
+            foreach (var binding in _bindings)
+            {
+                if (binding.Mode == BindingMode.OneWayToEntity) continue;
+                var path = prefix + binding.DtoProperty;
+                if ((binding.IsComputed && binding.ComputedExpression == null && binding.ComputedInMemory != null)
+                    || (!binding.IsComputed && binding.ToDtoExpression == null && binding.ToDtoInMemory != null))
+                    throw new InvalidOperationException($"Shape '{Name}', DTO path '{path}' has an in-memory-only transformation and cannot be projected.");
+                binding.Alternation?.Cls?.ValidateProjection(visited, path + ".");
+            }
+        }
+
         internal void BuildProperties()
         {
             if (_isInternal || _isBuiltProperties) return;
             _isBuiltProperties = true;
             foreach (var binding in _bindings)
             {
-                var memberInfo = _mappingTypeMember.PropertyOrField(binding.EntityProperty);
-                var alternation = FindAlternativeType(memberInfo.PropertyOrFieldType);
+                var memberInfo = binding.IsComputed ? null : _mappingTypeMember.PropertyOrField(binding.EntityProperty);
+                var alternation = binding.Alternation ?? (binding.IsComputed
+                    ? new AlternationInfo { Type = binding.DtoValueType }
+                    : FindAlternativeType(memberInfo.PropertyOrFieldType, binding));
                 binding.Alternation = alternation;
+                if (alternation.Cls != null) alternation.Cls.BuildProperties();
                 var propType = alternation.Type;
                 if (alternation.PropertyType == SpecialPropertyType.Array)
                 {
@@ -198,7 +186,8 @@ namespace Kkts.Dynamic
                     propType = typeof(IEnumerable<>).MakeGenericType(alternation.Type);
                 }
 
-                var attributesData = binding.Mode != BindingMode.OneWayToDto ? memberInfo.GetCustomAttributesData() : null;
+                var attributesData = binding.Mode != BindingMode.OneWayToDto && memberInfo != null
+                    && propType == memberInfo.PropertyOrFieldType ? memberInfo.GetCustomAttributesData() : null;
 
                 DeclareProperty(binding.DtoProperty, propType, attributesData, binding.Alternation.PropertyType == SpecialPropertyType.Alternative, alternation.Cls);
             }
@@ -208,29 +197,39 @@ namespace Kkts.Dynamic
         {
             if (_isInternal || _isBuiltMethods) return;
             _isBuiltMethods = true;
+            var transformationType = typeof(Action<,>).MakeGenericType(_typeBuilder, _mappingType);
+            if (_bindings.Any(b => b.IsTransformed && b.Mode != BindingMode.OneWayToEntity))
+                _forwardTransformations = _typeBuilder.DefineField("__ForwardTransformations", transformationType, FieldAttributes.Private | FieldAttributes.Static);
+            if (_bindings.Any(b => b.IsTransformed && b.Mode != BindingMode.OneWayToDto))
+                _reverseTransformations = _typeBuilder.DefineField("__ReverseTransformations", transformationType, FieldAttributes.Private | FieldAttributes.Static);
             using (var injectFromBinding = new InjectFromMemberBindingTree(this, _mappingType, _mappingTypeMember))
             {
-                injectFromBinding.Bind(_bindings);
+                injectFromBinding.Bind(_bindings.Where(b => !b.IsTransformed));
                 DeclareInjectFromMethod(injectFromBinding);
             }
 
             using (var injectToBinding = new InjectToMemberBindingTree(this, _mappingType, _mappingTypeMember))
             {
-                injectToBinding.Bind(_bindings);
+                injectToBinding.Bind(_bindings.Where(b => !b.IsTransformed));
                 DeclareInjectToMethod(injectToBinding);
             }
 
             DeclareGetPrimaryKeysMethod();
         }
 
-        private AlternationInfo FindAlternativeType(Type propType)
+        private AlternationInfo FindAlternativeType(Type propType, PropertyBinding binding)
+        {
+            return _assembly.ResolveAlternative(propType, binding);
+        }
+
+        internal static AlternationInfo ResolveAlternative(Type propType, Func<Type, Class> findClass)
         {
             var result = new AlternationInfo();
             Class cls;
             if (propType.IsArray)
             {
                 var elementType = propType.GetElementType();
-                cls = FindClass(elementType);
+                cls = findClass(elementType);
                 if (cls != null)
                 {
                     if (propType.GetArrayRank() != 1 || propType != elementType.MakeArrayType())
@@ -249,7 +248,7 @@ namespace Kkts.Dynamic
                 var elementType = propType.GetGenericArguments()[0];
                 if (IsSupportedCollection(propType))
                 {
-                    cls = FindClass(elementType);
+                    cls = findClass(elementType);
                     if (cls != null)
                     {
                         result.PropertyType = SpecialPropertyType.Collection;
@@ -262,7 +261,7 @@ namespace Kkts.Dynamic
                 }
             }
 
-            cls = FindClass(propType);
+            cls = findClass(propType);
 
             if (cls != null)
             {
@@ -279,24 +278,33 @@ namespace Kkts.Dynamic
             return result;
         }
 
-        private static bool IsSupportedCollection(Type type)
+        internal static bool IsSupportedCollection(Type type)
         {
+            if (!type.IsGenericType) return false;
             var definition = type.GetGenericTypeDefinition();
             return definition == typeof(List<>) || definition == typeof(IList<>)
                 || definition == typeof(ICollection<>) || definition == typeof(IEnumerable<>);
         }
 
-        private Class FindClass(Type type)
+        internal void ResolveBindings()
         {
-            foreach (var cls in _assembly.Classes)
+            if (_isInternal) return;
+            foreach (var binding in _bindings)
             {
-                if (cls._mappingType == type)
-                {
-                    return cls;
-                }
+                var member = binding.IsComputed ? null : _mappingTypeMember.PropertyOrField(binding.EntityProperty);
+                binding.Alternation = binding.IsComputed
+                    ? new AlternationInfo { Type = binding.DtoValueType }
+                    : FindAlternativeType(member.PropertyOrFieldType, binding);
+                if (binding.Alternation.PropertyType != SpecialPropertyType.Alternative) continue;
+                var paths = _bindings.Select(b => b.DtoProperty).Concat(_overlayPaths)
+                    .Where(path => path.StartsWith(binding.DtoProperty + ".", StringComparison.OrdinalIgnoreCase))
+                    .Select(path => path.Substring(binding.DtoProperty.Length + 1)).ToArray();
+                if (paths.Length == 0) continue;
+                var derived = _assembly.DeriveShape(binding.Alternation.Cls, paths);
+                binding.Alternation.Cls = derived;
+                binding.Alternation.Type = derived.TypeBuilder;
+                binding.Alternation.AlternativeCtor = derived.Constructor;
             }
-
-            return null;
         }
 
         private void DeclareProperty(string name, Type propType, IList<CustomAttributeData> customAttributesData, bool isAlternativeType, Class alternativeCls)
@@ -351,7 +359,7 @@ namespace Kkts.Dynamic
         {
             if (parent._alternativeProperties.TryGetValue(segment, out var alternative))
             {
-                parent._subClasses.Add(segment, alternative);
+                if (parent != this) parent._subClasses.Add(segment, alternative);
                 _subClasses.Add(path, alternative);
                 return alternative;
             }
@@ -381,6 +389,7 @@ namespace Kkts.Dynamic
             methodIL.MarkLabel(endIf);
 
             memberBindings.Build(methodIL);
+            EmitTransformations(methodIL, _forwardTransformations);
 
             methodIL.MarkLabel(ret);
             methodIL.Emit(OpCodes.Ret);
@@ -406,9 +415,57 @@ namespace Kkts.Dynamic
             methodIL.MarkLabel(endIf);
 
             memberBindings.Build(methodIL);
+            EmitTransformations(methodIL, _reverseTransformations);
 
             methodIL.MarkLabel(ret);
             methodIL.Emit(OpCodes.Ret);
+        }
+
+        private static void EmitTransformations(ILGenerator generator, FieldBuilder field)
+        {
+            if (field == null) return;
+            generator.Emit(OpCodes.Ldsfld, field);
+            generator.Emit(OpCodes.Ldarg_0);
+            generator.Emit(OpCodes.Ldarg_1);
+            generator.Emit(OpCodes.Callvirt, TypeBuilder.GetMethod(field.FieldType, typeof(Action<,>).GetMethod("Invoke")));
+        }
+
+        internal void InitializeTransformations()
+        {
+            if (_forwardTransformations != null) Initialize(_forwardTransformations, true);
+            if (_reverseTransformations != null) Initialize(_reverseTransformations, false);
+
+            void Initialize(FieldBuilder field, bool forward)
+            {
+                var dto = Expression.Parameter(_type, "dto");
+                var entity = Expression.Parameter(_mappingType, "entity");
+                var operations = new List<Expression>();
+                using (var sourceTree = new SelectSourceMemberExpressionTree(forward ? entity : dto))
+                {
+                    foreach (var binding in _bindings.Where(b => b.IsTransformed
+                        && (forward ? b.Mode != BindingMode.OneWayToEntity : b.Mode != BindingMode.OneWayToDto)))
+                    {
+                        var source = binding.IsComputed ? null : sourceTree.Property(forward ? binding.EntityProperty : binding.DtoProperty);
+                        var value = BindingExpressions.Transform(binding, source?.MemberExpression ?? (Expression)entity, forward, false);
+                        var targetPath = forward ? binding.DtoProperty : binding.EntityProperty;
+                        Func<string, bool> preserve = forward
+                            ? path => IsMappedDtoParent(path) : (Func<string, bool>)null;
+                        var write = BindingExpressions.Write(forward ? dto : entity, targetPath, value, preserve);
+                        operations.Add(source == null ? write : Expression.IfThen(source.Guard, write));
+                    }
+                }
+                var callback = Expression.Lambda(typeof(Action<,>).MakeGenericType(_type, _mappingType),
+                    Expression.Block(operations), dto, entity).Compile();
+                _type.GetField(field.Name, BindingFlags.NonPublic | BindingFlags.Static).SetValue(null, callback);
+            }
+        }
+
+        private bool IsMappedDtoParent(string path)
+        {
+            return _bindings.Any(b => b.Alternation?.PropertyType == SpecialPropertyType.Alternative
+                && (path.Equals(b.DtoProperty, StringComparison.OrdinalIgnoreCase)
+                    || (path.StartsWith(b.DtoProperty + ".", StringComparison.OrdinalIgnoreCase)
+                        && b.Alternation.Cls.IsMappedDtoParent(path.Substring(b.DtoProperty.Length + 1)))));
         }
 
         private static PropertyBuilder DeclareAutoProperty(string name, Type propType, TypeBuilder typeBuilder, IList<CustomAttributeData> customAttributesData = null)

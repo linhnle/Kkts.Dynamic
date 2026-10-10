@@ -23,6 +23,7 @@ namespace Kkts.Dynamic.Internal
         public MemberExpression MemberExpression { get; set; }
 
         public Expression Guard { get; private set; }
+        internal Expression Value => MemberExpression ?? (Expression)_param;
 
         public SelectSourceMemberExpressionTree Property(string name)
         {

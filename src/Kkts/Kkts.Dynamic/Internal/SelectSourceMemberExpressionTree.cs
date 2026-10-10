@@ -5,9 +5,9 @@ using System.Linq.Expressions;
 
 namespace Kkts.Dynamic.Internal
 {
-    internal class SelectSourceMemberExpressionTree : IDisposable
+    internal sealed class SelectSourceMemberExpressionTree : IDisposable
     {
-        private readonly Dictionary<string, SelectSourceMemberExpressionTree> _tree = new Dictionary<string, SelectSourceMemberExpressionTree>();
+        private readonly Dictionary<string, SelectSourceMemberExpressionTree> _tree = new Dictionary<string, SelectSourceMemberExpressionTree>(StringComparer.OrdinalIgnoreCase);
         private readonly ParameterExpression _param;
 
         private SelectSourceMemberExpressionTree() { }
@@ -15,11 +15,15 @@ namespace Kkts.Dynamic.Internal
         public SelectSourceMemberExpressionTree(ParameterExpression param)
         {
             _param = param;
+            Guard = Expression.NotEqual(param, Expression.Constant(null, param.Type));
         }
 
         public string Name { get; set; }
 
         public MemberExpression MemberExpression { get; set; }
+
+        public Expression Guard { get; private set; }
+        internal Expression Value => MemberExpression ?? (Expression)_param;
 
         public SelectSourceMemberExpressionTree Property(string name)
         {
@@ -27,17 +31,24 @@ namespace Kkts.Dynamic.Internal
             var current = this;
             foreach (var segment in segments)
             {
-                if (current._tree.ContainsKey(segment))
+                if (current._tree.TryGetValue(segment, out var existing))
                 {
-                    current = current._tree[segment];
+                    current = existing;
                 }
                 else
                 {
-                    var exp = Expression.PropertyOrField(current.MemberExpression ?? (Expression)_param, segment);
+                    var parent = current.MemberExpression ?? (Expression)_param;
+                    var member = parent.Type.GetMemberInfo(segment)
+                        ?? throw new InvalidOperationException($"Member '{segment}' does not exist on '{parent.Type.FullName}'.");
+                    var exp = Expression.MakeMemberAccess(parent, member);
+                    var guard = current.Guard;
+                    if (current.MemberExpression != null && !parent.Type.IsValueType)
+                        guard = Expression.AndAlso(guard, Expression.NotEqual(parent, Expression.Constant(null, parent.Type)));
                     var element = new SelectSourceMemberExpressionTree
                     {
                         Name = segment,
-                        MemberExpression = exp
+                        MemberExpression = exp,
+                        Guard = guard
                     };
                     current._tree.Add(segment, element);
                     current = element;

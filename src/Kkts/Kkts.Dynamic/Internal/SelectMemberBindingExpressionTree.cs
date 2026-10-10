@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Linq.Expressions;
@@ -6,27 +6,29 @@ using System.Reflection;
 
 namespace Kkts.Dynamic.Internal
 {
-    internal class SelectMemberBindingExpressionTree : IDisposable
+    internal sealed class SelectMemberBindingExpressionTree : IDisposable
     {
         private SelectSourceMemberExpressionTree _sourceMemberTree;
         private readonly Type _targetType;
-        private Type _sourceType;
         private readonly Dictionary<string, (MemberInfo Member, SelectMemberBindingExpressionTree Tree)> _tree;
-        private readonly List<MemberAssignment> _memberBindings;
+        private readonly Dictionary<string, MemberAssignment> _memberBindings;
+        private readonly List<Expression> _guards = new List<Expression>();
         private int _level;
+        private Expression _presence;
+        private readonly bool _isRoot;
 
-        public SelectMemberBindingExpressionTree(ParameterExpression param, Type targetType)
+        public SelectMemberBindingExpressionTree(ParameterExpression param, Type targetType) : this(targetType, 0)
         {
-            _sourceType = param?.Type;
             _sourceMemberTree = new SelectSourceMemberExpressionTree(param);
-            _targetType = targetType;
-            _tree = new Dictionary<string, (MemberInfo Member, SelectMemberBindingExpressionTree Tree)>();
-            _memberBindings = new List<MemberAssignment>();
+            _isRoot = true;
         }
 
-        private SelectMemberBindingExpressionTree(Type targetType, int level) : this(null, targetType)
+        private SelectMemberBindingExpressionTree(Type targetType, int level)
         {
+            _targetType = targetType;
             _level = level;
+            _tree = new Dictionary<string, (MemberInfo, SelectMemberBindingExpressionTree)>(StringComparer.OrdinalIgnoreCase);
+            _memberBindings = new Dictionary<string, MemberAssignment>(StringComparer.OrdinalIgnoreCase);
         }
 
         public void Bind(IEnumerable<PropertyBinding> bindings)
@@ -34,112 +36,115 @@ namespace Kkts.Dynamic.Internal
             foreach (var binding in bindings)
             {
                 if (binding.Mode == BindingMode.OneWayToEntity) continue;
-                Bind(binding.EntityProperty, binding.DtoProperty ?? binding.EntityProperty, binding.Alternation);
+                var source = binding.IsComputed ? null : _sourceMemberTree.Property(binding.EntityProperty);
+                var guard = source?.Guard ?? _sourceMemberTree.Guard;
+                var value = binding.IsTransformed
+                    ? BindingExpressions.Transform(binding, source?.MemberExpression ?? _sourceMemberTree.Value, true, true)
+                    : source.MemberExpression;
+                var segments = binding.DtoProperty.Split('.');
+                var current = this;
+                for (var i = 0; i < segments.Length - 1; ++i)
+                {
+                    var segment = segments[i];
+                    if (!current._tree.TryGetValue(segment, out var entry))
+                    {
+                        var member = current.GetMember(segment);
+                        var child = new SelectMemberBindingExpressionTree(member.GetMemberType(), current._level);
+                        current._tree.Add(segment, (member, child));
+                        entry = (member, child);
+                    }
+                    current._guards.Add(guard);
+                    current = entry.Tree;
+                }
+
+                current.BindMember(segments[segments.Length - 1], source, binding.Alternation, value, guard);
             }
         }
 
-        private void Bind(string sourceProperty, string targetProperty, AlternationInfo alternation)
+        private void BindMember(string name, SelectSourceMemberExpressionTree source, AlternationInfo alternation, Expression value, Expression sourceGuard)
         {
-            var sourceMember = _sourceMemberTree.Property(sourceProperty);
-            if (!sourceMember.MemberExpression.Member.IsPrimitive() 
-                && alternation.PropertyType != SpecialPropertyType.Alternative)
-            {
-                return;
-            }
-
-            if (alternation.PropertyType == SpecialPropertyType.Alternative && _level == Class.MaxRecursionDepthToBuildSelectorExpression)
-            {
-                return;
-            }
-            
-            MemberInfo member;
-            if (targetProperty.IndexOf('.') == -1)
-            {
-                if (_memberBindings.Any(p => p.Member.EqualsName(targetProperty))) return;
-
-                if (alternation.PropertyType == SpecialPropertyType.Alternative)
-                {
-                    member = _targetType.GetMemberInfo(targetProperty)
-                        ?? throw new InvalidOperationException($"The property {targetProperty} does not exist in type {_targetType.FullName}");
-                    var memberType = member.GetMemberType();
-                    var element = new SelectMemberBindingExpressionTree(memberType, _level + 1);
-                    element._sourceType = sourceMember.MemberExpression.Member.GetMemberType();
-                    element._sourceMemberTree = sourceMember;
-                    _tree.Add(targetProperty, (member, element));
-                    element.Bind(alternation.Cls.Bindings);
-                }
-                else
-                {
-                    member = _targetType.GetMemberInfo(targetProperty)
-                        ?? throw new InvalidOperationException($"The property or field {targetProperty} does not exist, it is related to {_sourceType.FullName}");
-                    var memberBinding = Expression.Bind(member, sourceMember.MemberExpression);
-                    _memberBindings.Add(memberBinding);
-                }
-
-                return;
-            }
-
-            var segments = targetProperty.Split('.');
-            var current = this;
-            var currentType = _targetType;
-            string segment;
-            for (var i = 0; i < segments.Length - 1; ++i)
-            {
-                segment = segments[i];
-                if (current._tree.ContainsKey(segment))
-                {
-                    current = current._tree[segment].Tree;
-                    currentType = current._targetType;
-                }
-                else
-                {
-                    member = currentType.GetMemberInfo(segment) 
-                        ?? throw new InvalidOperationException($"The property {targetProperty} does not exist in type {_targetType.FullName}");
-                    currentType = member.GetMemberType();
-                    var element = new SelectMemberBindingExpressionTree(currentType, i);
-                    element._sourceType = current._sourceType;
-                    current._tree.Add(segment, (member, element));
-                    current = element;
-                }
-            }
-
-            segment = segments[segments.Length - 1];
-            if (current._memberBindings.Any(p => p.Member.EqualsName(segment))) return;
-
+            var member = GetMember(name);
+            _guards.Add(sourceGuard);
             if (alternation.PropertyType == SpecialPropertyType.Alternative)
             {
-                member = currentType.GetMemberInfo(segment)
-                        ?? throw new InvalidOperationException($"The property {targetProperty} does not exist in type {_targetType.FullName}");
-                var memberType = member.GetMemberType();
-                var element = new SelectMemberBindingExpressionTree(memberType, segments.Length - 1);
-                element._sourceType = sourceMember.MemberExpression.Member.GetMemberType();
-                element._sourceMemberTree = sourceMember;
-                current._tree.Add(segment, (member, element));
-                element.Bind(alternation.Cls.Bindings);
+                CheckDepth();
+                if (!_tree.TryGetValue(name, out var entry))
+                {
+                    var child = new SelectMemberBindingExpressionTree(member.GetMemberType(), _level + 1);
+                    child._sourceMemberTree = source;
+                    child._presence = HasValue(source);
+                    _tree.Add(name, (member, child));
+                    entry = (member, child);
+                }
+                entry.Tree.Bind(alternation.Cls.Bindings);
+                return;
             }
-            else
+
+            Expression mappedValue = value;
+            Expression guard = sourceGuard;
+            if (alternation.PropertyType == SpecialPropertyType.Array || alternation.PropertyType == SpecialPropertyType.Collection)
             {
-                member = currentType.GetMemberInfo(segment);
-                current._memberBindings.Add(Expression.Bind(member, sourceMember.MemberExpression));
+                CheckDepth();
+                var element = Expression.Parameter(alternation.EntityElementType, "element");
+                var dtoElementType = alternation.Cls.GetBuiltType();
+                var elementTree = new SelectMemberBindingExpressionTree(element, dtoElementType);
+                elementTree._level = _level + 1;
+                elementTree.Bind(alternation.Cls.Bindings);
+                var elementValue = Expression.Condition(
+                    Expression.NotEqual(element, Expression.Constant(null, element.Type)),
+                    elementTree.Build(), Expression.Default(dtoElementType));
+                var selector = Expression.Lambda(elementValue, element);
+                var select = Expression.Call(typeof(Enumerable), nameof(Enumerable.Select),
+                    new[] { element.Type, dtoElementType }, value, selector);
+                mappedValue = Expression.Call(typeof(Enumerable),
+                    alternation.PropertyType == SpecialPropertyType.Array ? nameof(Enumerable.ToArray) : nameof(Enumerable.ToList),
+                    new[] { dtoElementType }, select);
+                if (mappedValue.Type != member.GetMemberType())
+                    mappedValue = Expression.Convert(mappedValue, member.GetMemberType());
+                guard = HasValue(source);
             }
+
+            var safeValue = Expression.Condition(guard, mappedValue, Expression.Default(member.GetMemberType()));
+            _memberBindings[name] = Expression.Bind(member, safeValue);
         }
 
-        internal MemberInitExpression Build()
+        private MemberInfo GetMember(string name)
         {
-            var bindings = _memberBindings.ToList();
+            return _targetType.GetMemberInfo(name)
+                ?? throw new InvalidOperationException($"Member '{name}' does not exist on '{_targetType.FullName}'.");
+        }
+
+        private static Expression HasValue(SelectSourceMemberExpressionTree source)
+        {
+            return Expression.AndAlso(source.Guard,
+                Expression.NotEqual(source.MemberExpression, Expression.Constant(null, source.MemberExpression.Type)));
+        }
+
+        private void CheckDepth()
+        {
+            if (_level >= Class.MaxRecursionDepthToBuildSelectorExpression)
+                throw new InvalidOperationException($"Selector recursion exceeds {Class.MaxRecursionDepthToBuildSelectorExpression}. Increase {nameof(Class.MaxRecursionDepthToBuildSelectorExpression)} for a finite graph or remove recursive bindings.");
+        }
+
+        internal Expression Build()
+        {
+            var bindings = _memberBindings.Values.Cast<MemberBinding>().ToList();
             bindings.AddRange(_tree.Select(p => Expression.Bind(p.Value.Member, p.Value.Tree.Build())));
-            return Expression.MemberInit(Expression.New(_targetType), bindings.ToArray());
+            Expression result = Expression.MemberInit(Expression.New(_targetType), bindings);
+            if (_isRoot) return result;
+            var presence = _presence ?? (_guards.Count == 0
+                ? (Expression)Expression.Constant(true)
+                : _guards.Aggregate(Expression.OrElse));
+            return Expression.Condition(presence, result, Expression.Default(_targetType));
         }
 
         void IDisposable.Dispose()
         {
-            foreach (var element in _tree.Values.ToArray())
-            {
-                ((IDisposable)element.Tree).Dispose();
-            }
-
+            foreach (var entry in _tree.Values) ((IDisposable)entry.Tree).Dispose();
             _tree.Clear();
-            ((IDisposable)_sourceMemberTree).Dispose();
+            _memberBindings.Clear();
+            _guards.Clear();
+            if (_sourceMemberTree != null) ((IDisposable)_sourceMemberTree).Dispose();
         }
     }
 }

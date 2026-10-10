@@ -8,3 +8,5 @@
 /src/Kkts/Kkts.Dynamic/bin/Release
 /src/Kkts/Kkts.Dynamic.UnitTest/bin
 /src/Kkts/Kkts.Dynamic.UnitTest/obj
+/benchmarks/Kkts.Dynamic.Benchmarks/bin
+/benchmarks/Kkts.Dynamic.Benchmarks/obj

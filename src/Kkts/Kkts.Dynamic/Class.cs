@@ -496,11 +496,11 @@ namespace Kkts.Dynamic
                 var namedProps = data.NamedArguments.Where(p => !p.IsField);
                 var namedFields = data.NamedArguments.Where(p => p.IsField);
                 var propInfos = namedProps.Select(p => (PropertyInfo)p.MemberInfo).ToArray();
-                var propValues = namedProps.Select(p => p.TypedValue.Value).ToArray();
+                var propValues = namedProps.Select(p => ConvertAttributeArgument(p.TypedValue)).ToArray();
                 var fieldInfos = namedFields.Select(p => (FieldInfo)p.MemberInfo).ToArray();
-                var fieldValues = namedFields.Select(p => p.TypedValue.Value).ToArray();
+                var fieldValues = namedFields.Select(p => ConvertAttributeArgument(p.TypedValue)).ToArray();
                 var attributeBuilder = new CustomAttributeBuilder(data.Constructor,
-                    data.ConstructorArguments.Select(p => p.Value).ToArray(),
+                    data.ConstructorArguments.Select(ConvertAttributeArgument).ToArray(),
                     propInfos,
                     propValues,
                     fieldInfos,
@@ -509,6 +509,24 @@ namespace Kkts.Dynamic
             }
 
             return propertyBuilder;
+        }
+
+        private static object ConvertAttributeArgument(CustomAttributeTypedArgument argument)
+        {
+            if (argument.Value == null) return null;
+            if (argument.Value is CustomAttributeTypedArgument boxed)
+                return ConvertAttributeArgument(boxed);
+            if (argument.ArgumentType.IsArray)
+            {
+                var elements = (IList<CustomAttributeTypedArgument>)argument.Value;
+                var array = Array.CreateInstance(argument.ArgumentType.GetElementType(), elements.Count);
+                for (var i = 0; i < elements.Count; i++)
+                    array.SetValue(ConvertAttributeArgument(elements[i]), i);
+                return array;
+            }
+            if (argument.ArgumentType.IsEnum)
+                return Enum.ToObject(argument.ArgumentType, argument.Value);
+            return argument.Value;
         }
 
         private ConstructorBuilder DeclareConstructor()

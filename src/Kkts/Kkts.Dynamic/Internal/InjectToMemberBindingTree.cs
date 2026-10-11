@@ -207,7 +207,7 @@ namespace Kkts.Dynamic.Internal
 
             if (targetMember.IsProperty)
             {
-                generator.Emit(OpCodes.Call, targetMember.Property.GetMethod);
+                generator.Emit(OpCodes.Callvirt, targetMember.Property.GetMethod);
             }
             else
             {
@@ -236,7 +236,7 @@ namespace Kkts.Dynamic.Internal
             generator.MarkLabel(memberBinding);
             if (targetMember.IsProperty)
             {
-                generator.Emit(OpCodes.Call, targetMember.Property.GetMethod);
+                generator.Emit(OpCodes.Callvirt, targetMember.Property.GetMethod);
             }
             else
             {
@@ -255,7 +255,7 @@ namespace Kkts.Dynamic.Internal
         private void BuildChildSet(ILGenerator generator, MemberTree target)
         {
             if (target.IsProperty)
-                generator.Emit(_isRoot ? OpCodes.Call : OpCodes.Callvirt, target.Property.SetMethod);
+                generator.Emit(OpCodes.Callvirt, target.Property.SetMethod);
             else
                 generator.Emit(OpCodes.Stfld, target.Field);
         }
@@ -337,7 +337,7 @@ namespace Kkts.Dynamic.Internal
 
             if (binding.Target.IsProperty)
             {
-                generator.Emit(OpCodes.Call, binding.Target.Property.GetMethod);
+                generator.Emit(OpCodes.Callvirt, binding.Target.Property.GetMethod);
             }
             else
             {
@@ -390,7 +390,7 @@ namespace Kkts.Dynamic.Internal
 
             if (binding.Target.IsProperty)
             {
-                generator.Emit(OpCodes.Call, binding.Target.Property.GetMethod);
+                generator.Emit(OpCodes.Callvirt, binding.Target.Property.GetMethod);
             }
             else
             {
@@ -413,7 +413,7 @@ namespace Kkts.Dynamic.Internal
             generator.Emit(OpCodes.Dup);
             if (binding.Target.IsProperty)
             {
-                generator.Emit(OpCodes.Call, binding.Target.Property.GetMethod);
+                generator.Emit(OpCodes.Callvirt, binding.Target.Property.GetMethod);
             }
             else
             {
@@ -431,7 +431,7 @@ namespace Kkts.Dynamic.Internal
             generator.Emit(OpCodes.Dup);
             if (binding.Target.IsProperty)
             {
-                generator.Emit(OpCodes.Call, binding.Target.Property.GetMethod);
+                generator.Emit(OpCodes.Callvirt, binding.Target.Property.GetMethod);
             }
             else
             {
@@ -457,7 +457,7 @@ namespace Kkts.Dynamic.Internal
             binding.Source.BuildGet(generator, ref nothing, ref afterSetPoint, true, ref isParentNullable, false);
             if (binding.Target.IsProperty)
             {
-                generator.Emit(OpCodes.Call, binding.Target.Property.SetMethod);
+                generator.Emit(OpCodes.Callvirt, binding.Target.Property.SetMethod);
             }
             else
             {
@@ -481,7 +481,7 @@ namespace Kkts.Dynamic.Internal
             binding.Source.BuildGet(generator, ref nothing, ref afterSetPoint, true, ref isParentNullable, false);
             if (binding.Target.IsProperty)
             {
-                generator.Emit(OpCodes.Call, binding.Target.Property.SetMethod);
+                generator.Emit(OpCodes.Callvirt, binding.Target.Property.SetMethod);
             }
             else
             {

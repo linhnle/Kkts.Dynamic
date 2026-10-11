@@ -281,14 +281,15 @@ namespace Kkts.Dynamic.Internal
         private static void BuildAlternativePropertyMap(ILGenerator generator, (string Name, PropertyInfo PI, MemberTree Source, AlternationInfo Alternation) binding)
         {
             var afterSetPoint = generator.DefineLabel();
+            var nullValue = generator.DefineLabel();
             var nothing = generator.DefineLabel();
             generator.Emit(OpCodes.Nop);
+            generator.Emit(OpCodes.Ldarg_0);
             generator.Emit(OpCodes.Ldarg_1);
             var byPass = false;
             binding.Source.BuildGet(generator, ref nothing, ref afterSetPoint, true, ref byPass, false);
-            generator.Emit(OpCodes.Brfalse, afterSetPoint);
+            generator.Emit(OpCodes.Brfalse, nullValue);
             generator.Emit(OpCodes.Nop);
-            generator.Emit(OpCodes.Ldarg_0);
             generator.Emit(OpCodes.Newobj, binding.Alternation.AlternativeCtor);
             generator.Emit(OpCodes.Call, binding.PI.SetMethod);
             generator.Emit(OpCodes.Nop);
@@ -297,6 +298,9 @@ namespace Kkts.Dynamic.Internal
             generator.Emit(OpCodes.Ldarg_1);
             binding.Source.BuildGet(generator, ref nothing, ref afterSetPoint, true, ref byPass, true);
             generator.Emit(OpCodes.Call, Mapper.MapFromEntityToDtoMethodInfo);
+            generator.Emit(OpCodes.Br, afterSetPoint);
+            generator.MarkLabel(nullValue);
+            generator.Emit(OpCodes.Pop);
             generator.MarkLabel(afterSetPoint);
             generator.Emit(OpCodes.Nop);
         }

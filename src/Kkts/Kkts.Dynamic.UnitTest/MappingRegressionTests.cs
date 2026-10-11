@@ -26,6 +26,386 @@ namespace Kkts.Dynamic.UnitTest
         private static object Get(object instance, string name) => instance.GetType().GetProperty(name).GetValue(instance);
         private static void Set(object instance, string name, object value) => instance.GetType().GetProperty(name).SetValue(instance, value);
 
+        private static Func<T, object> CompileSelector<T>(Class cls)
+        {
+            var selector = cls.BuildSelectorExpression();
+            return System.Linq.Expressions.Expression.Lambda<Func<T, object>>(
+                System.Linq.Expressions.Expression.Convert(selector.Body, typeof(object)), selector.Parameters).Compile();
+        }
+
+        private static object GetPath(object instance, string path)
+        {
+            foreach (var segment in path.Split('.'))
+                instance = Get(instance, segment);
+            return instance;
+        }
+
+        public class DispatchChild
+        {
+            public virtual int Id { get; set; }
+            public string Name { get; set; }
+        }
+
+        public class DerivedDispatchChild : DispatchChild
+        {
+            public int LastId { get; private set; }
+            public int StoredId => base.Id;
+            public override int Id
+            {
+                get => 42;
+                set { LastId = value; base.Id = value + 100; }
+            }
+        }
+
+        public class DispatchEntity
+        {
+            public virtual int Id { get; set; }
+            public virtual DispatchChild Child { get; set; }
+            public virtual DispatchEntity Branch { get; set; }
+            public virtual List<DispatchChild> Items { get; set; }
+            public virtual DispatchChild[] Children { get; set; }
+        }
+
+        public class DerivedDispatchEntity : DispatchEntity
+        {
+            public DispatchChild ChildValue;
+            public DispatchEntity BranchValue;
+            public int ChildReads;
+            public int ChildWrites;
+            public int BranchWrites;
+            public int CollectionWrites;
+            public int LastId;
+            public int StoredId => base.Id;
+            public override int Id
+            {
+                get => base.Id + 100;
+                set { LastId = value; base.Id = value + 200; }
+            }
+            public override DispatchChild Child
+            {
+                get { ChildReads++; return ChildValue; }
+                set { ChildWrites++; ChildValue = value; }
+            }
+            public override DispatchEntity Branch
+            {
+                get => BranchValue;
+                set { BranchWrites++; BranchValue = value; }
+            }
+            public override List<DispatchChild> Items
+            {
+                get => base.Items;
+                set { CollectionWrites++; base.Items = value; }
+            }
+            public override DispatchChild[] Children
+            {
+                get => base.Children;
+                set { CollectionWrites++; base.Children = value; }
+            }
+        }
+
+        [Theory]
+        [InlineData("Child.Id", "Id", 42)]
+        [InlineData("Child.Id", "Nested.Id", 42)]
+        [InlineData("Branch.Child.Id", "Nested.Id", 42)]
+        [InlineData("Id", "Nested.Id", 100)]
+        public void VirtualGettersMatchFreshMappingAndSelectors(string entityPath, string dtoPath, int expected)
+        {
+            var declaration = Declare<DispatchEntity>(Binding(entityPath, dtoPath, BindingMode.OneWayToDto));
+            using (declaration.Assembly)
+            {
+                declaration.Assembly.Build();
+                var child = new DerivedDispatchChild();
+                var source = new DerivedDispatchEntity
+                {
+                    ChildValue = child,
+                    BranchValue = new DerivedDispatchEntity { ChildValue = child }
+                };
+                Assert.Equal(expected, GetPath(CompileSelector<DispatchEntity>(declaration.Class)(source), dtoPath));
+                var dto = Activator.CreateInstance(declaration.Class.GetBuiltType());
+                Mapper.MapFromEntityToDto(dto, source);
+                Assert.Equal(expected, GetPath(dto, dtoPath));
+                Assert.Equal(expected, GetPath(declaration.Class.CreateDto(source), dtoPath));
+            }
+        }
+
+        [Theory]
+        [InlineData("Id", "Id", false)]
+        [InlineData("Id", "Id", true)]
+        [InlineData("Child.Id", "Id", false)]
+        [InlineData("Child.Id", "Nested.Id", true)]
+        [InlineData("Branch.Child.Id", "Nested.Id", false)]
+        [InlineData("Branch.Child.Id", "Id", true)]
+        public void VirtualSettersUpdateExistingDerivedInstances(string entityPath, string dtoPath, bool partial)
+        {
+            var declaration = Declare<DispatchEntity>(Binding(entityPath, dtoPath));
+            using (declaration.Assembly)
+            {
+                declaration.Assembly.Build();
+                var dto = declaration.Class.CreateDto(new DispatchEntity
+                {
+                    Id = 7, Child = new DispatchChild { Id = 7 },
+                    Branch = new DispatchEntity { Child = new DispatchChild { Id = 7 } }
+                });
+                var child = new DerivedDispatchChild();
+                var branch = new DerivedDispatchEntity { ChildValue = child };
+                var entity = new DerivedDispatchEntity { ChildValue = child, BranchValue = branch };
+                if (partial)
+                    Mapper.MapPartialFromDtoToEntity(dto, entity, new[] { dtoPath });
+                else
+                    Mapper.MapFromDtoToEntity(dto, entity);
+                if (entityPath == "Id")
+                {
+                    Assert.Equal(7, entity.LastId);
+                    Assert.Equal(207, entity.StoredId);
+                }
+                else
+                {
+                    Assert.Same(child, entity.ChildValue);
+                    Assert.Same(child, branch.ChildValue);
+                    Assert.Equal(7, child.LastId);
+                    Assert.Equal(107, child.StoredId);
+                    Assert.Equal(0, entity.ChildWrites + branch.ChildWrites);
+                    Assert.True((entityPath.StartsWith("Branch") ? branch : entity).ChildReads > 0);
+                }
+            }
+        }
+
+        [Theory]
+        [InlineData(false, false)]
+        [InlineData(false, true)]
+        [InlineData(true, false)]
+        [InlineData(true, true)]
+        public void NestedCreationInvokesVirtualParentSetters(bool nested, bool partial)
+        {
+            var declaration = Declare<DispatchEntity>(Binding(nested ? "Branch.Child.Id" : "Child.Id", "Fields.Id"));
+            using (declaration.Assembly)
+            {
+                declaration.Assembly.Build();
+                var dto = declaration.Class.CreateDto(new DispatchEntity
+                {
+                    Child = new DispatchChild { Id = 7 },
+                    Branch = new DispatchEntity { Child = new DispatchChild { Id = 7 } }
+                });
+                var parent = new DerivedDispatchEntity();
+                var entity = nested ? new DerivedDispatchEntity { BranchValue = parent } : parent;
+                if (partial)
+                    Mapper.MapPartialFromDtoToEntity(dto, entity, new[] { "Fields.Id" });
+                else
+                    Mapper.MapFromDtoToEntity(dto, entity);
+                Assert.Equal(1, parent.ChildWrites);
+                Assert.IsType<DispatchChild>(parent.ChildValue);
+                Assert.Equal(7, parent.ChildValue.Id);
+            }
+        }
+
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void MultiLevelCreationInvokesRootOverride(bool partial)
+        {
+            var declaration = Declare<DispatchEntity>(Binding("Branch.Child.Id", "Id"));
+            using (declaration.Assembly)
+            {
+                declaration.Assembly.Build();
+                var dto = declaration.Class.CreateDto(new DispatchEntity
+                {
+                    Branch = new DispatchEntity { Child = new DispatchChild { Id = 7 } }
+                });
+                var entity = new DerivedDispatchEntity();
+                if (partial)
+                    Mapper.MapPartialFromDtoToEntity(dto, entity, new[] { "Id" });
+                else
+                    Mapper.MapFromDtoToEntity(dto, entity);
+                Assert.Equal(1, entity.BranchWrites);
+                Assert.Equal(7, entity.BranchValue.Child.Id);
+            }
+        }
+
+        [Theory]
+        [InlineData(false, false, false)]
+        [InlineData(false, false, true)]
+        [InlineData(false, true, false)]
+        [InlineData(false, true, true)]
+        [InlineData(true, false, false)]
+        [InlineData(true, false, true)]
+        [InlineData(true, true, false)]
+        [InlineData(true, true, true)]
+        public void MappedObjectsUseVirtualAccessorsForCreationAndReuse(bool nested, bool existing, bool partial)
+        {
+            using (var assembly = new DynamicAssembly())
+            {
+                var cls = assembly.DeclareClass("Dto", typeof(DispatchEntity),
+                    new[] { Binding(nested ? "Branch.Child" : "Child", "Child") });
+                assembly.DeclareClass("ChildDto", typeof(DispatchChild), new[] { Binding("Id") });
+                assembly.Build();
+                var dto = cls.CreateDto(new DispatchEntity
+                {
+                    Child = new DispatchChild { Id = 7 },
+                    Branch = new DispatchEntity { Child = new DispatchChild { Id = 7 } }
+                });
+                var child = existing ? new DerivedDispatchChild() : null;
+                var parent = new DerivedDispatchEntity { ChildValue = child };
+                var entity = nested ? new DerivedDispatchEntity { BranchValue = parent } : parent;
+                if (partial)
+                    Mapper.MapPartialFromDtoToEntity(dto, entity, new[] { "Child" });
+                else
+                    Mapper.MapFromDtoToEntity(dto, entity);
+                Assert.True(parent.ChildReads > 0);
+                if (existing)
+                {
+                    Assert.Same(child, parent.ChildValue);
+                    Assert.Equal(7, child.LastId);
+                    Assert.Equal(107, child.StoredId);
+                    Assert.Equal(0, parent.ChildWrites);
+                }
+                else
+                {
+                    Assert.IsType<DispatchChild>(parent.ChildValue);
+                    Assert.Equal(7, parent.ChildValue.Id);
+                    Assert.Equal(1, parent.ChildWrites);
+                }
+            }
+        }
+
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void VirtualCollectionSettersPreserveReplacementAndNullElements(bool partial)
+        {
+            using (var assembly = new DynamicAssembly())
+            {
+                var cls = assembly.DeclareClass("Dto", typeof(DispatchEntity), new[] { Binding("Items"), Binding("Children") });
+                assembly.DeclareClass("ChildDto", typeof(DispatchChild), new[] { Binding("Id") });
+                assembly.Build();
+                var dto = cls.CreateDto(new DispatchEntity
+                {
+                    Items = new List<DispatchChild> { new DispatchChild { Id = 7 }, null },
+                    Children = new[] { null, new DispatchChild { Id = 8 } }
+                });
+                var entity = new DerivedDispatchEntity();
+                if (partial)
+                    Mapper.MapPartialFromDtoToEntity(dto, entity, new[] { "Items", "Children" });
+                else
+                    Mapper.MapFromDtoToEntity(dto, entity);
+                Assert.Equal(2, entity.CollectionWrites);
+                Assert.Equal(7, entity.Items[0].Id);
+                Assert.Null(entity.Items[1]);
+                Assert.Null(entity.Children[0]);
+                Assert.Equal(8, entity.Children[1].Id);
+                Set(dto, "Items", null);
+                Set(dto, "Children", null);
+                if (partial)
+                    Mapper.MapPartialFromDtoToEntity(dto, entity, new[] { "Items", "Children" });
+                else
+                    Mapper.MapFromDtoToEntity(dto, entity);
+                Assert.Null(entity.Items);
+                Assert.Null(entity.Children);
+                Assert.Equal(4, entity.CollectionWrites);
+            }
+        }
+
+        [Fact]
+        public void VirtualPathsRetainIntermediateNullAndPresenceSemantics()
+        {
+            var declaration = Declare<DispatchEntity>(Binding("Child.Id", "Fields.Id"));
+            using (declaration.Assembly)
+            {
+                declaration.Assembly.Build();
+                var dto = declaration.Class.CreateDto(new DispatchEntity { Child = new DispatchChild { Id = 7 } });
+                Mapper.MapFromEntityToDto(dto, new DerivedDispatchEntity());
+                Assert.Equal(7, GetPath(dto, "Fields.Id"));
+                Assert.Null(Get(declaration.Class.CreateDto(new DerivedDispatchEntity()), "Fields"));
+                Assert.Null(Get(CompileSelector<DispatchEntity>(declaration.Class)(new DerivedDispatchEntity()), "Fields"));
+                var entity = new DerivedDispatchEntity();
+                Mapper.MapPartialFromDtoToEntity(dto, entity, Array.Empty<string>());
+                Assert.Equal(0, entity.ChildReads + entity.ChildWrites);
+                Set(dto, "Fields", null);
+                Mapper.MapFromDtoToEntity(dto, entity);
+                Assert.Equal(0, entity.ChildReads + entity.ChildWrites);
+                Assert.Throws<ArgumentException>(() => Mapper.MapPartialFromDtoToEntity(dto, entity, new[] { "Fields.Id" }));
+                Assert.Equal(0, entity.ChildReads + entity.ChildWrites);
+                Mapper.MapFromEntityToDto(null, entity);
+                Mapper.MapFromDtoToEntity(dto, null);
+                Mapper.MapFromDtoToEntity(null, entity);
+                Assert.Equal(0, entity.ChildReads + entity.ChildWrites);
+            }
+        }
+
+        [Fact]
+        public void NullMappedObjectPreservesInFullMappingAndClearsThroughOverrideInPartialMapping()
+        {
+            using (var assembly = new DynamicAssembly())
+            {
+                var cls = assembly.DeclareClass("Dto", typeof(DispatchEntity), new[] { Binding("Child") });
+                assembly.DeclareClass("ChildDto", typeof(DispatchChild), new[] { Binding("Id") });
+                assembly.Build();
+                var dto = cls.CreateDto(new DispatchEntity());
+                var child = new DerivedDispatchChild();
+                var entity = new DerivedDispatchEntity { ChildValue = child };
+                Mapper.MapFromDtoToEntity(dto, entity);
+                Assert.Same(child, entity.ChildValue);
+                Assert.Equal(0, entity.ChildWrites);
+                Mapper.MapPartialFromDtoToEntity(dto, entity, new[] { "Child" });
+                Assert.Null(entity.ChildValue);
+                Assert.Equal(1, entity.ChildWrites);
+            }
+        }
+
+        public class ThrowingDispatchChild : DispatchChild
+        {
+            public readonly FormatException Failure = new FormatException("override failed");
+            public override int Id
+            {
+                get => throw Failure;
+                set => throw Failure;
+            }
+        }
+
+        [Fact]
+        public void NestedMappedObjectNullGuardsPreserveExistingDto()
+        {
+            using (var assembly = new DynamicAssembly())
+            {
+                var cls = assembly.DeclareClass("Dto", typeof(DispatchEntity), new[] { Binding("Branch.Child", "Child") });
+                assembly.DeclareClass("ChildDto", typeof(DispatchChild), new[] { Binding("Id") });
+                assembly.Build();
+                var dto = cls.CreateDto(new DispatchEntity
+                {
+                    Branch = new DispatchEntity { Child = new DerivedDispatchChild() }
+                });
+                var childDto = Get(dto, "Child");
+                Assert.Equal(42, Get(childDto, "Id"));
+                foreach (var source in new[] { new DispatchEntity(), new DispatchEntity { Branch = new DispatchEntity() } })
+                {
+                    Mapper.MapFromEntityToDto(dto, source);
+                    Assert.Same(childDto, Get(dto, "Child"));
+                    Assert.Null(Get(cls.CreateDto(source), "Child"));
+                    Assert.Null(Get(CompileSelector<DispatchEntity>(cls)(source), "Child"));
+                }
+            }
+        }
+
+        [Fact]
+        public void ThrowingVirtualAccessorsPropagateOriginalExceptions()
+        {
+            var declaration = Declare<DispatchEntity>(Binding("Child.Id", "Id"));
+            using (declaration.Assembly)
+            {
+                declaration.Assembly.Build();
+                var child = new ThrowingDispatchChild();
+                var entity = new DerivedDispatchEntity { ChildValue = child };
+                var dto = Activator.CreateInstance(declaration.Class.GetBuiltType());
+                Assert.Same(child.Failure, Assert.Throws<FormatException>(() => Mapper.MapFromEntityToDto(dto, entity)));
+                Assert.Same(child.Failure, Assert.Throws<FormatException>(() => declaration.Class.CreateDto(entity)));
+                var selector = CompileSelector<DispatchEntity>(declaration.Class);
+                Assert.Same(child.Failure, Assert.Throws<FormatException>(() => selector(entity)));
+                Set(dto, "Id", 7);
+                Assert.Same(child.Failure, Assert.Throws<FormatException>(() => Mapper.MapFromDtoToEntity(dto, entity)));
+                Assert.Same(child.Failure, Assert.Throws<FormatException>(() =>
+                    Mapper.MapPartialFromDtoToEntity(dto, entity, new[] { "Id" })));
+            }
+        }
+
         [Fact]
         public void PublicConfigurationFieldAndClassSnapshotsRemainCompatible()
         {

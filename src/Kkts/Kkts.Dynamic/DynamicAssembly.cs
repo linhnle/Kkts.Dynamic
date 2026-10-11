@@ -107,8 +107,12 @@ namespace Kkts.Dynamic
                 foreach (var cls in AllClasses().ToArray()) cls.BuildType();
                 foreach (var cls in AllClasses()) cls.InitializeTransformations();
                 foreach (var cls in AllClasses()) cls.RegisterPartialUpdates();
+                var metadataPublication = DtoMetadataBuilder.Stage(
+                    AllClasses().Where(c => c.MappingType != null).ToArray(),
+                    _classMap.Values.Where(c => c.MappingType != null).ToArray());
                 foreach (var cls in AllClasses()) cls.Clear();
                 _state = BuildState.Built;
+                metadataPublication.Publish();
             }
             catch (Exception error)
             {
@@ -217,7 +221,8 @@ namespace Kkts.Dynamic
         {
             var name = $"__{baseShape.Name}_{Guid.NewGuid():N}";
             var builder = _moduleBuilder.DefineType(name, TypeAttributes.Public, null, new[] { typeof(IDtoObject) });
-            var derived = new Class(builder, name, this, baseShape.MappingType, BindingValidation.Snapshot(baseShape.Bindings), overlayPaths);
+            var derived = new Class(builder, name, this, baseShape.MappingType, BindingValidation.Snapshot(baseShape.Bindings),
+                overlayPaths, baseShape.DeclaredShapeName);
             _derivedClasses.Add(derived);
             return derived;
         }

@@ -145,7 +145,7 @@ namespace Kkts.Dynamic.Internal
             generator.MarkLabel(notNullJumpPoint);
             if (IsProperty)
             {
-                if (isNullable && !ignoreNullableCheck)
+                if (_cls != null && isNullable && !ignoreNullableCheck)
                 {
                     generator.Emit(OpCodes.Call, Property.GetMethod);
                 }

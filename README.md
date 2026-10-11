@@ -228,13 +228,14 @@ Here, `product` and `dtoType` come from the quick start. Array helpers require s
 - Entity mapping types must be visible, closed reference classes. Property paths must contain non-empty segments. Omitting `DtoProperty` uses `EntityProperty`.
 - DTO paths are case-insensitive and must be unique. Multiple bindings cannot write the same entity path. Redeclaring a class name is only allowed with equivalent mappings.
 - Entity-to-DTO bindings need public getters. DTO-to-entity bindings need public setters/writable fields. Indexed properties and nested value-type paths are unsupported.
+- Reference-type entity getters and setters honor runtime overrides, including base-declared nested properties and compatible derived entities. Reverse mapping reuses existing derived child instances and invokes parent setter overrides when creating missing children.
 - Reverse mapping creates nested/alternative entities and collection elements using public parameterless constructors. Abstract types or types without these constructors fail during `Build()`, not during mapping.
 - Mapped collections support `List<T>`, `IList<T>`, `ICollection<T>`, and `IEnumerable<T>` properties; mapped arrays must be single-dimensional, zero-based arrays. Unregistered property types are assigned directly, not deep-copied.
 - Mapping helpers accept enumerable implementations without relying on their concrete generic arguments and enumerate inputs once. Non-null invalid DTOs, incompatible entities, and invalid helper inputs throw descriptive exceptions instead of silently returning. Getter/setter exceptions propagate directly rather than being wrapped in `TargetInvocationException`.
 - Primary keys must be top-level properties on both sides; their output order follows `PrimaryKeyOrder`.
 - Configure declarations and build on one thread. A successful build is idempotent. A failed build permanently faults that assembly; create a new one. Disposal rejects further builder use, but already-created DTO types remain usable.
 - Concurrent mapping of distinct objects is supported after build. Do not concurrently mutate the same destination or build/cache selector expressions on the same `Class`.
-- Entity property attributes are copied for bindings that can write back to the entity.
+- Source-member attributes are copied for bindings that can write back to the entity and retain the source member's type. CLR-supported constructor and named property/field arguments retain their values and types, including enums, `Type`, boxed values, and typed arrays (including null and empty arrays). Forward-only, changed-type converted, computed, and type-substituted properties do not gain copied source attributes.
 - Null DTO/entity arguments are no-ops. Null intermediate objects skip their bindings, preserving existing destination values. Null directly mapped scalar/collection properties are assigned; null mapped alternative objects preserve existing objects. Arrays and mapped collections preserve null elements.
 - Property assignments use emitted IL. Mapping dispatch and object factories use cached delegates with weak type keys so collectible assemblies can unload. Build and first-call costs still apply; measure performance for your workload.
 
@@ -253,6 +254,80 @@ assembly.DeclareClass<CatalogProduct>("CatalogSummary", b => b
 String bindings use `NestedShape` for the same selection. A selected shape must belong to this assembly and map the exact entity or collection-element type; declarations can reference a shape declared later. Zero matching shapes retain direct assignment, and one retains automatic substitution. **Migration:** multiple matching nested shapes now fail validation instead of choosing the first registration. Set `NestedShape` explicitly for ambiguous bindings.
 
 Additional paths beneath a mapped object (for example, `Child.Id` to `Child.ExtraId`) extend an isolated per-use DTO layout. They do not add properties to the registered base DTO or another parent's nested shape. Overlay source paths remain relative to the parent entity and can refer to other parent members. Incompatible base/overlay leaves and duplicate reverse writes are configuration errors. Without overlays, the nested DTO keeps the selected base type.
+
+## Built DTO shape metadata
+
+Inspect a successfully built shape without retaining or duplicating mutable binding configuration:
+
+```csharp
+var metadata = productDtoClass.GetMetadata(); // after assembly.Build()
+var resolution = metadata.ResolveField("name");
+if (!resolution.Success)
+    throw new InvalidOperationException(
+        resolution.Diagnostic.Message + " " + resolution.Diagnostic.SuggestedFix);
+
+var field = resolution.Field;
+Console.WriteLine(metadata.Name);           // ProductDto
+Console.WriteLine(metadata.EntityType);     // Product
+Console.WriteLine(metadata.DtoType);        // generated DTO type
+Console.WriteLine(field.DtoPath);           // Name (canonical emitted spelling)
+Console.WriteLine(field.EntityPath);        // ProductName
+Console.WriteLine(field.DirectEntityAlias); // ProductName
+```
+
+`DtoShapeMetadata.Layout.Members` contains every immediate generated property in ordinal case-insensitive order. `DtoMemberMetadata` distinguishes a mapped value from a synthetic grouping container. `Binding` is an immutable descriptor, not a `PropertyBinding`: it reports the declaring shape/entity, declaration-relative paths, actual value types, original `BindingMode`, key designation/order, and `DtoBindingKind` (`Direct`, `Converted`, `Computed`, `MappedObject`, `MappedArray`, or `MappedCollection`). Grouping nodes have no binding or entity source. `PrimaryKeys` contains only root keys in the same stable order as `GetIds`, including DTO-side converted key types; a nested key is not promoted to a root key.
+
+`ResolveField` accepts finite dot-separated DTO paths using ordinal case-insensitive matching, returning canonical emitted names. Renamed `Name` can source `ProductName`, flattened `CategoryName` can source `Category.Name`, and grouped `External.Code` can source `ExternalCode`. Resolving `External` itself describes only a grouping node, with no alias or mapping direction. Failed resolution has a `Diagnostic` and no `Field`, with `Code`, root `ShapeName`, requested `DtoPath`, `FailedSegment`, `Message`, and `SuggestedFix`. Invalid/empty paths, padded segments, index/wildcard syntax, unknown fields, and undeclared descendants are explicit failures. Arbitrary descendants of unregistered directly assigned objects are not inferred.
+
+For nested mapped values, `NestedShape` identifies the selected registered shape; `NestedLayout` describes the actual effective object or element layout and generated type, including per-use overlays. A parent overlay `Title -> Child.Title` still reports root source `Title`, not `Child.Title`. Base layouts and other parents do not acquire that overlay. Inherited descendant directions intersect their mapped ancestors' directions, while separately declared overlays retain their declaring owner's directions. `HasForwardMapping` / `HasReverseMapping` describe effective mapping availability, not query or update authorization.
+
+Layouts are finite shared graphs. Recursive shapes reuse layout identities; immediate enumeration terminates and finite paths such as `Child.Child.Id` resolve without expanding the graph or changing selector recursion limits. Consumers recursively enumerating `NestedLayout` must track visited layout identities and stop cycles. Resolution does not cache an unbounded set of paths. For a structural element path such as `Items.Name`, `CollectionBoundaries` identifies `Items`, value types describe the element leaf, and `DirectEntityAlias` is null: the reported source is not an executable root member chain. No index, quantifier, element querying, or element updates are introduced.
+
+### Metadata lifecycle and Type lookup
+
+| State | `Class.GetMetadata()` | Retained metadata / declared-Type lookup |
+| --- | --- | --- |
+| Before or during build | Explicit not-built failure; no implicit build | Unavailable |
+| Complete successful build | Same immutable snapshot on repeated calls | Available |
+| Failed build, including late failures | Explicit fault failure | No metadata from that failed build is published |
+| Builder/declaration disposed | `ObjectDisposedException` | Remains usable while referenced types are reachable |
+
+```csharp
+Type dtoType = productDtoClass.GetBuiltType();
+((IDisposable)assembly).Dispose();
+var metadataFromType = DtoShapeMetadata.GetForType(dtoType);
+var nameField = metadataFromType.ResolveField("Name");
+```
+
+`GetForType` accepts exact explicitly declared DTO types, not an entity type. `TryGetForType(dtoType, out metadata, out diagnostic)` returns false with actionable `MetadataUnavailable` or `ContextualDtoType` diagnostics; `GetForType` throws for unsupported types. Both reject a null Type with `ArgumentNullException`. Synthetic grouping types and derived overlay types are contextual, not independently registered entity shapes: inspect them through the owning root's effective nested layout. Registered base child types remain independently discoverable.
+
+Metadata, binding descriptors, layouts, lists, diagnostics, and resolution results are immutable and safe for concurrent reads after build, including after builder disposal. They do not retain builders, mutable bindings, emission state, or transformation delegates. Static discovery uses weak type keys so otherwise unreachable collectible assemblies can unload. Explicitly retaining metadata, a nested layout, a field result, or a generated Type naturally retains its referenced types. Release all such references before expecting collection. Configure and build on one thread as before.
+
+### Future Kkts.Querying integration
+
+The following adapter sketch uses the quick-start shape and only public Kkts.Dynamic APIs; it is not a current Kkts.Expressions API:
+
+```csharp
+var aliases = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+foreach (var requestedPath in new[] { "Name", "Price" })
+{
+    var result = metadata.ResolveField(requestedPath);
+    if (!result.Success)
+        throw new InvalidOperationException(
+            result.Diagnostic.Message + " " + result.Diagnostic.SuggestedFix);
+    if (result.Field.DirectEntityAlias == null)
+        throw new NotSupportedException(
+            $"'{result.Field.DtoPath}' requires a transformed-value or element strategy.");
+    aliases.Add(result.Field.DtoPath, result.Field.DirectEntityAlias);
+}
+// A separate Kkts.Querying adapter can give these structural aliases to Kkts.Expressions.
+```
+
+`EntityPath` is provenance, not proof of an unchanged DTO value. `DirectEntityAlias` is available only for an effectively forward-enabled ordinary direct value, without transformations or element boundaries. `PriceText = Price.ToString()` has source `Price` but no alias, even with a reverse converter. Same-type conversions and computed/in-memory-only values are also not aliases. Even a direct alias does not imply predicate equivalence: an absent entity parent can produce defaults in a fresh DTO rather than a naive member-access value.
+
+`ForwardExecutionKind` distinguishes `None`, `MemberAccess`, `Expression`, `InMemory`, and `NestedMapping`. It reports the configured representation; nested mapping requires inspecting descendants and does not guarantee a complete selector. Expression construction, expression compilation, and database-provider translation are separate concerns. No provider translation, client-evaluation fallback, filtering/sorting policy, or SQL generation is claimed.
+
+Individual field expression retrieval is deferred to a projection-focused follow-up. Whole-shape `BuildSelectorExpression` remains unchanged. Isolated expressions for converted/computed fields and selection-specific projection when unrelated fields are delegate-only remain unavailable. The follow-up must share existing selector value/presence semantics, define a field value as observed in a fresh projected DTO (leaf default when a projected parent is absent), inline expression-backed transformations, preserve intermediate-null skips and directly mapped null inputs, and leave computed null navigation to the computation. It must explicitly reject in-memory-only operations, grouping/whole object/collection values, and element paths until supported, without expanding recursive siblings or inferring predicate equivalence from reverse converters.
 
 ## Mapping validation
 

@@ -36,11 +36,14 @@ namespace Kkts.Dynamic
         private readonly string[] _overlayPaths;
         private FieldBuilder _forwardTransformations;
         private FieldBuilder _reverseTransformations;
+        private DtoShapeMetadata _metadata;
+        private DtoMetadataPublication _metadataPublication;
 
-        internal Class(TypeBuilder typeBuilder, string name, DynamicAssembly assembly, Type mappingType, IEnumerable<PropertyBinding> bindings, string[] overlayPaths = null)
+        internal Class(TypeBuilder typeBuilder, string name, DynamicAssembly assembly, Type mappingType, IEnumerable<PropertyBinding> bindings, string[] overlayPaths = null, string declaredShapeName = null)
         {
             _typeBuilder = typeBuilder;
             Name = name;
+            DeclaredShapeName = declaredShapeName ?? name;
             _assembly = assembly;
             _mappingType = mappingType;
             _bindings = bindings;
@@ -67,6 +70,22 @@ namespace Kkts.Dynamic
 
         internal IEnumerable<PropertyBinding> Bindings => _bindings;
         internal Type MappingType => _mappingType;
+        internal string DeclaredShapeName { get; }
+
+        /// <summary>Gets the immutable metadata after successful build. Retained metadata survives builder disposal.</summary>
+        public DtoShapeMetadata GetMetadata()
+        {
+            EnsureUsable();
+            if (_metadataPublication == null || !_metadataPublication.IsReady)
+                throw new InvalidOperationException($"Shape '{Name}' has no metadata yet. Call DynamicAssembly.Build successfully first.");
+            return _metadata;
+        }
+
+        internal void SetMetadata(DtoShapeMetadata metadata, DtoMetadataPublication publication)
+        {
+            _metadata = metadata;
+            _metadataPublication = publication;
+        }
         internal void RegisterPartialUpdates()
         {
             if (!_isInternal) Mapper.RegisterPartialUpdates(this);
@@ -295,6 +314,7 @@ namespace Kkts.Dynamic
                 binding.Alternation = binding.IsComputed
                     ? new AlternationInfo { Type = binding.DtoValueType }
                     : FindAlternativeType(member.PropertyOrFieldType, binding);
+                binding.Alternation.SelectedShape = binding.Alternation.Cls;
                 if (binding.Alternation.PropertyType != SpecialPropertyType.Alternative) continue;
                 var paths = _bindings.Select(b => b.DtoProperty).Concat(_overlayPaths)
                     .Where(path => path.StartsWith(binding.DtoProperty + ".", StringComparison.OrdinalIgnoreCase))
@@ -607,6 +627,7 @@ namespace Kkts.Dynamic
                     if (binding.Alternation != null)
                     {
                         binding.Alternation.Cls = null;
+                        binding.Alternation.SelectedShape = null;
                         binding.Alternation = null;
                     }
                 }

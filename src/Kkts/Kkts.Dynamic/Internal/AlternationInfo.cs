@@ -7,6 +7,8 @@ namespace Kkts.Dynamic.Internal
     {
         public Class Cls;
 
+        internal Class SelectedShape;
+
         public Type Type;
 
         public Type EntityElementType;
